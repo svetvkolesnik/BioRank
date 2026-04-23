@@ -22,7 +22,7 @@ import statsmodels.api as sm
 st.set_page_config(page_title="DoseRanker Pro", layout="wide", initial_sidebar_state="expanded")
 
 st.title("🎯 DoseRanker Pro")
-st.markdown("**Полная математическая модель многокритериальной оптимизации доз (4.1-4.7)**")
+st.markdown("**Полная математическая модель многокритериальной оптимизации доз**")
 
 # ======================
 # ПРАВИЛА ЭКСПЕРИМЕНТОВ
