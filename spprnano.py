@@ -91,9 +91,6 @@ def visualize_outliers(df, features):
 def compute_dose_sensitivity(df, dose_col, features, alpha=0.05):
     """Kruskal-Wallis + Spearman + квадратичная регрессия"""
     results = []
-
-    def compute_dose_sensitivity(df, dose_col, features, alpha=0.05):
-    results = []
     for feature in features:
         x = df[feature].dropna()
         doses = df.loc[x.index, dose_col]
