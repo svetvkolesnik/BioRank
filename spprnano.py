@@ -332,7 +332,7 @@ if 'df_processed' in st.session_state:
         df_final = st.session_state.df_clean
 
         st.markdown("---")
-        st.header("🔬 **Шаг 2: Дозозависимость маркеров (4.2.1)**")
+        st.header("🔬 **Шаг 2: Дозозависимость маркеров**")
 
         if st.button("📊 Анализ дозочувствительности", key="dose_analysis"):
             with st.spinner("Kruskal-Wallis + квадратичная регрессия..."):
@@ -359,11 +359,12 @@ if 'df_processed' in st.session_state:
 
             st.metric("Дозочувствительных", f"{len(sensitive)}/{len(features)}")
 
-    # Шаг 3: Многокритериальный анализ
+        # Шаг 3: Многокритериальный анализ
     if 'dose_stats' in st.session_state:
         st.markdown("---")
-        st.header("🎯 **Шаг 3: Многокритериальный анализ (4.2-4.7)**")
+        st.header("🎯 **Шаг 3: Многокритериальный анализ**")
 
+        # 3.1 Исходный список дозозависимых маркеров
         sensitive_markers = st.session_state.dose_stats[
             st.session_state.dose_stats['dose_sensitive']
         ]['marker'].tolist()
@@ -373,24 +374,66 @@ if 'df_processed' in st.session_state:
             st.warning("⚠️ Нет дозочувствительных маркеров, используем все признаки")
             sensitive_markers = features
 
-        # Автоотбор
-        me_auto = [m for m in sensitive_markers if
-                  any(kw.lower() in str(m).lower() for kw in rules["efficiency_keywords"])]
-        ms_auto = [m for m in sensitive_markers if
-                  any(kw.lower() in str(m).lower() for kw in rules["toxic_keywords"])]
+        # 3.2 Отбор с учётом корреляций (убираем сильно коррелирующие маркеры)
+        df_final = st.session_state.df_clean
+
+        # Берём только столбцы из sensitive_markers, которые реально есть в df_final
+        corr_cols = [m for m in sensitive_markers if m in df_final.columns]
+
+        if len(corr_cols) > 1:
+            corr_matrix = df_final[corr_cols].corr(method='pearson')
+
+            # Порог по модулю корреляции
+            corr_threshold = 0.9
+
+            to_drop = set()
+            cols = corr_matrix.columns.tolist()
+
+            for i in range(len(cols)):
+                for j in range(i + 1, len(cols)):
+                    if abs(corr_matrix.iloc[i, j]) > corr_threshold:
+                        # Удаляем один из двух, например второй
+                        to_drop.add(cols[j])
+
+            reduced_markers = [c for c in corr_cols if c not in to_drop]
+
+            if to_drop:
+                st.info(
+                    f"Удалено {len(to_drop)} сильно коррелирующих маркеров "
+                    f"(порог |r| > {corr_threshold:.1f}). "
+                    f"Осталось {len(reduced_markers)} маркеров."
+                )
+            else:
+                st.info("Сильно коррелирующих маркеров не обнаружено.")
+
+            sensitive_markers = reduced_markers
+        else:
+            st.info("Для анализа корреляций нужно хотя бы два маркера.")
+
+        # Дальше – автоотбор M_E, M_S уже из обновлённого sensitive_markers
+        me_auto = [m for m in sensitive_markers
+                   if any(kw.lower() in str(m).lower() for kw in rules["efficiency_keywords"])]
+        ms_auto = [m for m in sensitive_markers
+                   if any(kw.lower() in str(m).lower() for kw in rules["toxic_keywords"])]
 
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**M_E Эффективность**")
-            me_selected = st.multiselect("Выберите", sensitive_markers,
-                                       default=me_auto[:5] if me_auto else sensitive_markers[:3],
-                                       key="me_select")
+            me_selected = st.multiselect(
+                "Выберите",
+                sensitive_markers,
+                default=me_auto[:5] if me_auto else sensitive_markers[:3],
+                key="me_select"
+            )
         with col2:
             st.markdown("**M_S Безопасность**")
-            ms_selected = st.multiselect("Выберите", sensitive_markers,
-                                       default=ms_auto[:5] if ms_auto else [],
-                                       key="ms_select")
-
+            ms_selected = st.multiselect(
+                "Выберите",
+                sensitive_markers,
+                default=ms_auto[:5] if ms_auto else [],
+                key="ms_select"
+            )
+    
         # ✅ СЛАЙДЕРЫ ВЫНЕСЕНЫ ЗА ПРЕДЕЛЫ КНОПКИ
         st.markdown("### ⚖️ Веса критериев")
         col1, col2, col3 = st.columns(3)
@@ -490,7 +533,7 @@ if 'df_processed' in st.session_state:
                              w_S_norm * results['S_norm'])
 
             # 🏆 РЕЗУЛЬТАТЫ
-            st.markdown("### 🏆 **ОПТИМИЗАЦИЯ ДОЗ (4.7)**")
+            st.markdown("### 🏆 **ОПТИМИЗАЦИЯ ДОЗ**")
 
             # Форматируем дозу для отображения
             results_display = results.copy()
@@ -569,4 +612,4 @@ else:
     """)
 
 st.markdown("---")
-st.markdown("*© 2026 DoseRanker Pro | Математическая модель 4.1-4.7*")
+st.markdown("*© 2026 DoseRanker Pro | Математическая модель*")
