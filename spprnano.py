@@ -17,7 +17,7 @@ import re
 import statsmodels.api as sm
 
 # ======================
-# КОНФИГУРАЦИЯ
+# КОНФИГУРАЦИЯ И ПРАВИЛА
 # ======================
 st.set_page_config(page_title="DoseRanker Pro", layout="wide", initial_sidebar_state="expanded")
 
@@ -30,15 +30,15 @@ st.markdown("**Полная математическая модель много
 EXPERIMENT_RULES = {
     "Rats_ZnO": {
         "name": "Крысы Wistar (ZnO НЧ)",
-        "efficiency_keywords": ["Zn", "SOD", "CA4", "ALP_liver", "Li_liver", "I_liver", "weight", "масса"],
-        "toxic_keywords": ["As", "Pb", "Hg", "Cr", "ALP_blood", "ZAG_brain"],
-        "balance_ratios": ["Na/K", "Ca/Mg", "Ca/P", "Zn/Cu"]
+        "efficiency_keywords": ["SOD", "CA4", "ADH1B", "MT", "ZAG", "I_muscles", "weight", "масса"],
+        "toxic_keywords": ["As", "Pb", "Hg", "Cr", "Cd", "Al", "V", "Ni", "Be", "Sn", "ALP_blood"],
+        "balance_ratios": ["Na/K", "Ca/Mg", "Ca/P", "Zn/Cu", "Zn/Fe"]
     },
     "Carp_Metals": {
         "name": "Карпы (Mg/Mn/Cu-C)",
-        "efficiency_keywords": ["weight", "масса", "белок", "RBC", "HGB", "HCT"],
-        "toxic_keywords": ["Pb", "Cd", "глюкоза", "холестерин"],
-        "balance_ratios": ["Ca/Fe", "V/Pb"]
+        "efficiency_keywords": ["weight", "масса", "белок", "RBC", "HGB", "MT"],
+        "toxic_keywords": ["Pb", "Cd", "глюкоза", "холестерин", "ALP_blood"],
+        "balance_ratios": ["Ca/Fe", "V/Pb", "Na/K"]
     }
 }
 
@@ -51,22 +51,18 @@ def safe_numeric(col, lod=0.00005):
 
     # Обработка <число
     def extract_censored(val):
-        match = re.search(r'<([0-9,\\.]+)', str(val))
-        if match:
-            return lod
+        if '<' in str(val):
+            # Добавляем микро-шум, чтобы значения не были идентичны (важно для Kruskal-Wallis)
+            return lod * np.random.uniform(0.8, 1.2)
         return val
-
     s = s.apply(extract_censored)
     s = s.str.replace(',', '.', regex=False).str.replace(' ', '', regex=False)
-    s = s.replace(['', 'nan', 'NaN', 'None'], np.nan)
-
     return pd.to_numeric(s, errors='coerce')
 
 def winsorize_feature(series, limits=(0.05, 0.95)):
-    """Winsorizing выбросов"""
     data = series.dropna()
-    if len(data) > 3:
-        lower, upper = data.quantile([limits[0], limits[1]])
+    if len(data) > 5:
+        lower, upper = data.quantile(limits)
         return series.clip(lower=lower, upper=upper)
     return series
 
@@ -90,109 +86,83 @@ def visualize_outliers(df, features):
                     plt.close(fig)
 
 # ======================
-# 4.2.1 ПРОВЕРКА ДОЗОЗАВИСИМОСТИ
+# АНАЛИЗ ДОЗОЧУВСТВИТЕЛЬНОСТИ
 # ======================
 def compute_dose_sensitivity(df, dose_col, features, alpha=0.05):
     """Kruskal-Wallis + Spearman + квадратичная регрессия"""
     results = []
 
-    def kruskal_safe(x, groups):
-        df_test = pd.DataFrame({'x': x, 'group': groups}).dropna()
-        if len(df_test) < 6 or df_test['group'].nunique() < 2:
-            return np.nan
-        samples = [g['x'].dropna().values for _, g in df_test.groupby('group')]
-        if any(len(s) < 2 for s in samples):
-            return np.nan
-        try:
-            return stats.kruskal(*samples)[1]
-        except:
-            return np.nan
-
+    def compute_dose_sensitivity(df, dose_col, features, alpha=0.05):
+    results = []
     for feature in features:
-        x = df[feature]
-        doses = df[dose_col]
-        valid = ~x.isna() & ~doses.isna()
-
-        if valid.sum() < 10:
-            results.append({'marker': feature, 'p_kw': np.nan, 'rho': np.nan,
-                          'p_spear': np.nan, 'p_quad': np.nan, 'dose_sensitive': False})
+        x = df[feature].dropna()
+        doses = df.loc[x.index, dose_col]
+        
+        if len(x) < 6 or doses.nunique() < 2:
             continue
 
-        # Kruskal-Wallis
-        p_kw = kruskal_safe(x[valid].values, doses[valid].values)
+        # 1. Kruskal-Wallis
+        groups = [val.values for _, val in x.groupby(doses)]
+        p_kw = stats.kruskal(*groups)[1] if len(groups) > 1 else 1.0
+        
+        # 2. Spearman
+        rho, p_spear = stats.spearmanr(doses, x)
+        
+        # 3. Квадратичная регрессия (только если >3 уровней доз)
+        p_quad = 1.0
+        if doses.nunique() > 3:
+            try:
+                X = sm.add_constant(pd.DataFrame({'d': doses, 'd2': doses**2}))
+                model = sm.OLS(x, X).fit()
+                p_quad = model.pvalues.get('d2', 1.0)
+            except: pass
 
-        # Spearman
-        if valid.sum() >= 4:
-            rho, p_spear = stats.spearmanr(doses[valid], x[valid])
-        else:
-            rho, p_spear = np.nan, np.nan
-
-        # Квадратичная регрессия
-        p_quad = np.nan
-        try:
-            df_reg = pd.DataFrame({'dose': doses[valid].values, 'x': x[valid].values})
-            if len(df_reg) > 5:
-                X = sm.add_constant(pd.DataFrame({
-                    'dose': df_reg['dose'],
-                    'dose2': df_reg['dose']**2
-                }))
-                model = sm.OLS(df_reg['x'], X).fit()
-                p_quad = model.pvalues.get('dose2', np.nan)
-        except:
-            pass
-
-        # ✅ ИСПРАВЛЕНА логика (правильные скобки)
-        is_sensitive = False
-        if not pd.isna(p_kw) and p_kw < alpha:
-            is_sensitive = True
-        elif not pd.isna(p_quad) and p_quad < alpha:
-            is_sensitive = True
-
-        results.append({
-            'marker': feature,
-            'p_kw': p_kw,
-            'rho': rho,
-            'p_spear': p_spear,
-            'p_quad': p_quad,
-            'dose_sensitive': is_sensitive
-        })
-
+        is_sensitive = (p_kw < alpha) or (p_spear < alpha and abs(rho) > 0.5) or (p_quad < alpha)
+        results.append({'marker': feature, 'p_kw': p_kw, 'rho': rho, 'p_quad': p_quad, 'dose_sensitive': is_sensitive})
     return pd.DataFrame(results)
 
+
 # ======================
-# 4.3 КРИТЕРИЙ БАЛАНСА
+# КРИТЕРИЙ БАЛАНСА (УЛУЧШЕННЫЙ)
 # ======================
 def compute_balance_criterion(df, dose_col, control_dose, balance_ratios, features):
-    """Критерий баланса через физиологические отношения"""
+    """Критерий баланса с учетом локации маркеров"""
     B_vals = {}
-    doses = sorted(df[dose_col].dropna().unique())
+    doses = sorted(df[dose_col].unique())
+    eps = 1e-8
 
     for dose in doses:
         deviations = []
-        for ratio in balance_ratios:
-            if '/' in ratio:
-                num, den = ratio.split('/')
-                num_cols = [col for col in features if num.lower() in col.lower()]
-                den_cols = [col for col in features if den.lower() in col.lower()]
-
-                if num_cols and den_cols:
-                    num_col, den_col = num_cols[0], den_cols[0]
-                    dose_data = df[df[dose_col] == dose][[num_col, den_col]].dropna()
-                    ctrl_data = df[df[dose_col] == control_dose][[num_col, den_col]].dropna()
-
-                    if len(dose_data) > 0 and len(ctrl_data) > 0:
-                        dose_ratio = (dose_data[num_col] / dose_data[den_col]).median()
-                        ctrl_ratio = (ctrl_data[num_col] / ctrl_data[den_col]).median()
-
-                        all_data = df[[num_col, den_col]].dropna()
-                        all_ratios = all_data[num_col] / all_data[den_col]
-                        iqr_ratio = np.percentile(all_ratios.dropna(), 75) - np.percentile(all_ratios.dropna(), 25)
-
-                        if iqr_ratio > 0:
-                            deviation = abs((dose_ratio - ctrl_ratio) / iqr_ratio)
-                            deviations.append(deviation)
-
-        B_vals[dose] = -np.median(deviations) if deviations else 0.0
+        for ratio_str in balance_ratios:
+            num_base, den_base = ratio_str.split('/')
+            
+            # Ищем все органы, где есть числитель
+            num_cols = [c for c in features if num_base.lower() in c.lower()]
+            
+            for nc in num_cols:
+                # Определяем локацию (суффикс после _)
+                loc = re.search(r'(_[a-z]+)$', nc.lower())
+                loc_suffix = loc.group(1) if loc else ""
+                
+                # Ищем знаменатель в ТОЙ ЖЕ локации
+                dc_match = [c for c in features if den_base.lower() in c.lower() and c.lower().endswith(loc_suffix)]
+                
+                if dc_match:
+                    dc = dc_match[0]
+                    dose_data = df[df[dose_col] == dose]
+                    ctrl_data = df[df[dose_col] == control_dose]
+                    
+                    if not dose_data.empty and not ctrl_data.empty:
+                        d_ratio = (dose_data[nc] / (dose_data[dc] + eps)).median()
+                        c_ratio = (ctrl_data[nc] / (ctrl_data[dc] + eps)).median()
+                        
+                        all_r = df[nc] / (df[dc] + eps)
+                        iqr_r = all_r.quantile(0.75) - all_r.quantile(0.25)
+                        
+                        if iqr_r > 0:
+                            deviations.append(abs((d_ratio - c_ratio) / iqr_r))
+        
+        B_vals[dose] = -np.nanmedian(deviations) if deviations else 0.0
     return B_vals
 
 # ======================
