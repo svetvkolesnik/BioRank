@@ -833,7 +833,7 @@ if "df_processed" in st.session_state:
             m_cols[2].metric("S (риск) ↓ меньше лучше", f"{results.loc[best_idx, 'S_norm']:.3f}")
             m_cols[3].metric("B (баланс)", f"{results.loc[best_idx, 'B_norm']:.3f}")
 
-            # Если есть бутстрэп — показываем его статистику
+                       # Если есть бутстрэп — показываем его статистику
             if "I_boot" in st.session_state:
                 st.markdown("### 📊 Бутстрэп устойчивости I_g")
                 I_boot = st.session_state.I_boot
@@ -844,30 +844,18 @@ if "df_processed" in st.session_state:
                 best_counts_all = {g: 0 for g in groups_bs}
 
                 if n_boot_eff > 0:
-                    # Матрица: итерации × группы
                     I_mat = np.vstack([I_boot[g] for g in groups_bs]).T  # shape: (n_boot, n_groups)
-
-                    # Глобальный лидер на каждой итерации (включая контроль)
                     for row in I_mat:
                         idx_best = int(np.argmax(row))
                         g_best = groups_bs[idx_best]
                         best_counts_all[g_best] += 1
 
-                # Определяем контрольную группу в виде, как она хранится в I_boot
-                control_str = str(control_group)
-
-                # Список только опытных групп (без контроля) — для интерпретации
-                test_groups = [g for g in groups_bs if str(g) != control_str]
-
-                # Для каждой группы — медиана, ДИ, вероятность быть лучшей
                 for g in groups_bs:
                     vals = np.array(I_boot[g])
                     med = np.median(vals)
                     low = np.percentile(vals, 2.5)
                     high = np.percentile(vals, 97.5)
-                    prob_best_all = (
-                        best_counts_all[g] / n_boot_eff if n_boot_eff > 0 else np.nan
-                    )
+                    prob_best_all = best_counts_all[g] / n_boot_eff if n_boot_eff > 0 else np.nan
                     boot_rows.append(
                         {
                             "Группа": g,
@@ -883,24 +871,46 @@ if "df_processed" in st.session_state:
                 )
                 st.dataframe(boot_df.round(3), use_container_width=True)
 
-                # Отдельно подсвечиваем оптимальную ДОЗУ среди опытных (без контроля)
+                # Дополнительно: лучшая опытная группа без контроля
+                control_str = str(control_group)
+                test_groups = [g for g in groups_bs if str(g) != control_str]
+
                 if n_boot_eff > 0 and test_groups:
-                    # Вероятность быть лучшей среди доз: считаем максимум по test_groups на каждой итерации
-                    best_counts_dose = {g: 0 for g in test_groups}
+                    best_counts_test = {g: 0 for g in test_groups}
+
                     for row in I_mat:
-                        # индекс лучшей среди ТЕСТовых групп
                         vals_test = [row[groups_bs.index(g)] for g in test_groups]
                         idx_best_t = int(np.argmax(vals_test))
                         g_best_t = test_groups[idx_best_t]
-                        best_counts_dose[g_best_t] += 1
+                        best_counts_test[g_best_t] += 1
 
-                    probs_dose = {
-                        g: best_counts_dose[g] / n_boot_eff for g in test_groups
-                    }
-                    best_dose = max(probs_dose, key=probs_dose.get)
+                    test_rows = []
+                    for g in test_groups:
+                        vals = np.array(I_boot[g])
+                        test_rows.append(
+                            {
+                                "Группа": g,
+                                "I_med_без_контроля": np.median(vals),
+                                "I_2.5%_без_контроля": np.percentile(vals, 2.5),
+                                "I_97.5%_без_контроля": np.percentile(vals, 97.5),
+                                "P(лучшая среди опытных)": best_counts_test[g] / n_boot_eff,
+                            }
+                        )
+
+                    test_df = pd.DataFrame(test_rows).sort_values(
+                        "P(лучшая среди опытных)", ascending=False
+                    )
+
+                    st.markdown("### 📌 Лучшие опытные группы без контроля")
+                    st.dataframe(test_df.round(3), use_container_width=True)
+
+                    best_test_idx = test_df["P(лучшая среди опытных)"].idxmax()
+                    best_test_group = test_df.loc[best_test_idx, "Группа"]
+                    best_test_prob = test_df.loc[best_test_idx, "P(лучшая среди опытных)"]
+
                     st.info(
-                        f"📌 **Лучшая доза среди опытных (без контроля)**: {best_dose}  "
-                        f"(P≈{probs_dose[best_dose]:.2f} быть лучшей среди доз)"
+                        f"Лучшая опытная группа без контроля: **{best_test_group}** "
+                        f"(P = {best_test_prob:.2f})"
                     )
 
                 fig_bs, ax_bs = plt.subplots(figsize=(max(8, len(groups_bs) * 1.2), 5))
