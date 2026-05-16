@@ -309,9 +309,17 @@ st.sidebar.header("📁 Загрузка данных")
 uploaded_file = st.sidebar.file_uploader("CSV/Excel — основные данные (биохимия, элементы)", type=["csv","xlsx"], key="main_file")
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚖️ Масса тела (опционально)")
-st.sidebar.caption("Отдельный файл: строки = особи, столбцы = группа + масса финального взвешивания. Особи могут не совпадать с основным файлом.")
-weight_file = st.sidebar.file_uploader("CSV/Excel — масса тела", type=["csv","xlsx"], key="weight_file")
+st.sidebar.header("📎 Дополнительная подвыборка (опционально)")
+st.sidebar.caption(
+    "Файл с признаками из параллельной случайной выборки особей той же группы. "
+    "Строки = особи, столбцы = группа + признак(и). "
+    "Особи могут не совпадать с основным файлом."
+)
+weight_file = st.sidebar.file_uploader(
+    "CSV/Excel — дополнительная подвыборка",
+    type=["csv", "xlsx"],
+    key="weight_file",
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ЗАГРУЗКА ОСНОВНОГО ФАЙЛА
@@ -375,19 +383,38 @@ if weight_file is not None:
         st.sidebar.success(f"✅ Масса: {len(df_wraw)} строк")
         st.session_state.df_weight_raw = df_wraw
 
-        st.sidebar.markdown("**Столбцы файла массы:**")
-        wg_col_name = st.sidebar.selectbox("Столбец с группами (масса)", df_wraw.columns, key="wg_col")
-        wv_col_name = st.sidebar.selectbox("Столбец с массой тела", [c for c in df_wraw.columns if c != wg_col_name], key="wv_col")
+        st.sidebar.markdown("**Столбцы файла дополнительной подвыборки:**")
+        # Ключи виджетов (wg_col_sel, wv_col_sel) намеренно отличаются от
+        # ключей session_state (wg_col, wv_col), чтобы избежать конфликта:
+        # Streamlit запрещает явно менять session_state[key], если key
+        # уже используется как ключ виджета.
+        wg_col_name = st.sidebar.selectbox(
+            "Столбец с группами",
+            df_wraw.columns,
+            key="wg_col_sel",   # ← ключ виджета
+        )
+        wv_col_name = st.sidebar.selectbox(
+            "Столбец с дополнительным признаком",
+            [c for c in df_wraw.columns if c != wg_col_name],
+            key="wv_col_sel",   # ← ключ виджета
+        )
 
         df_wraw["_wgroup"] = df_wraw[wg_col_name].astype(str).str.strip()
         unique_wgroups = sorted(df_wraw["_wgroup"].dropna().unique(), key=str)
-        st.sidebar.markdown(f"Групп в файле массы: **{len(unique_wgroups)}** — " + ", ".join(str(g) for g in unique_wgroups))
-        control_group_w = st.sidebar.selectbox("Контрольная группа (файл массы)", options=unique_wgroups, index=0, key="ctrl_w")
+        st.sidebar.markdown(
+            f"Групп: **{len(unique_wgroups)}** — " + ", ".join(str(g) for g in unique_wgroups)
+        )
+        control_group_w = st.sidebar.selectbox(
+            "Контрольная группа (доп. файл)",
+            options=unique_wgroups,
+            key="ctrl_w_sel",   # ← ключ виджета
+        )
 
+        # Сохраняем в session_state под ДРУГИМИ именами (без конфликта)
         st.session_state.df_weight_raw = df_wraw
-        st.session_state.wg_col = "_wgroup"
-        st.session_state.wv_col = wv_col_name
-        st.session_state.control_group_w = control_group_w
+        st.session_state["wg_col"] = "_wgroup"        # имя обработанного столбца
+        st.session_state["wv_col"] = wv_col_name      # имя столбца значений
+        st.session_state["control_group_w"] = control_group_w
     except Exception as e:
         import traceback
         st.sidebar.error(f"❌ Ошибка файла массы: {e}"); st.sidebar.code(traceback.format_exc())
@@ -478,56 +505,83 @@ if "df_processed" in st.session_state:
                 else:
                     st.info("Сильно коррелирующих маркеров не обнаружено.")
 
-        # ── БЛОК МАССЫ ТЕЛА ─────────────────────────────────────────────────
+        # ── БЛОК ДОПОЛНИТЕЛЬНОЙ ПОДВЫБОРКИ ──────────────────────────────────
         st.markdown("---")
-        st.markdown("### ⚖️ Масса тела")
+        st.markdown("### 📎 Дополнительная подвыборка")
         has_weight = "df_weight_raw" in st.session_state
 
         if not has_weight:
-            st.info("📂 Файл с данными о массе тела не загружен. Загрузите его в боковой панели, чтобы включить массу как дополнительный маркер эффективности.")
+            st.info(
+                "📂 Файл дополнительной подвыборки не загружен. "
+                "Загрузите его в боковой панели, чтобы включить признаки из параллельной выборки "
+                "в критерий эффективности или безопасности."
+            )
             weight_shifts_final = None
         else:
             df_w = st.session_state.df_weight_raw
-            wg_col = st.session_state.wg_col
-            wv_col = st.session_state.wv_col
-            control_group_w = st.session_state.control_group_w
+            wg_col = st.session_state["wg_col"]
+            wv_col = st.session_state["wv_col"]
+            control_group_w = st.session_state["control_group_w"]
 
-            p_kw_w, shifts_w, summary_w = compute_weight_kw_and_shifts(df_w, wg_col, wv_col, control_group_w, alpha=alpha_val)
+            p_kw_w, shifts_w, summary_w = compute_weight_kw_and_shifts(
+                df_w, wg_col, wv_col, control_group_w, alpha=alpha_val
+            )
 
             col_w1, col_w2 = st.columns(2)
             with col_w1:
-                st.markdown("**Описательная статистика массы тела:**")
+                st.markdown(f"**Описательная статистика: «{wv_col}»**")
                 st.dataframe(summary_w, use_container_width=True)
             with col_w2:
-                st.markdown(f"**KW-тест для массы:** p = {p_kw_w:.4f}")
+                st.markdown(f"**KW-тест для «{wv_col}»:** p = {p_kw_w:.4f}")
                 if p_kw_w < alpha_val:
-                    st.success(f"✅ Различия значимы (p={p_kw_w:.4f}<{alpha_val}). Масса включается в M_E.")
+                    st.success(
+                        f"✅ Различия значимы (p = {p_kw_w:.4f} < {alpha_val}). "
+                        f"Признак «{wv_col}» будет включён в M_E."
+                    )
                 else:
-                    st.warning(f"⚠️ Различия не значимы (p={p_kw_w:.4f}≥{alpha_val}). Масса исключена по критерию значимости.")
+                    st.warning(
+                        f"⚠️ Различия не значимы (p = {p_kw_w:.4f} ≥ {alpha_val}). "
+                        f"Признак «{wv_col}» исключён по критерию значимости."
+                    )
 
-            force_include = st.checkbox("Включить массу принудительно (игнорировать p-значение)", value=False,
-                help="Если различия биологически важны, но не достигли порога из-за малой выборки.")
+            force_include = st.checkbox(
+                f"Включить «{wv_col}» принудительно (игнорировать p-значение)",
+                value=False,
+                help="Используйте, если различия биологически значимы, "
+                     "но не достигли порога из-за малой выборки в дополнительной подвыборке.",
+            )
 
             if p_kw_w < alpha_val or force_include:
                 weight_shifts_final = shifts_w
                 if shifts_w:
-                    st.caption("Нормированные сдвиги медианы массы: " +
-                               ", ".join(f"{g}: {v:+.3f}" for g, v in sorted(shifts_w.items(), key=lambda x: str(x[0]))))
+                    st.caption(
+                        f"Нормированные сдвиги медианы «{wv_col}» по группам: "
+                        + ", ".join(
+                            f"{g}: {v:+.3f}"
+                            for g, v in sorted(shifts_w.items(), key=lambda x: str(x[0]))
+                        )
+                    )
                 else:
-                    st.warning("Сдвиги по массе не вычислены (IQR=0 или нет данных контроля)."); weight_shifts_final = None
+                    st.warning(
+                        "Сдвиги не вычислены: IQR = 0 или контрольная группа не найдена в файле."
+                    )
+                    weight_shifts_final = None
             else:
                 weight_shifts_final = None
 
             st.session_state.weight_shifts_final = weight_shifts_final
 
-            if st.button("📊 Боксплоты массы тела по группам"):
+            if st.button(f"📊 Боксплоты «{wv_col}» по группам"):
                 groups_w_uniq = sorted(df_w[wg_col].unique(), key=str)
-                fig_w, ax_w = plt.subplots(figsize=(max(8, len(groups_w_uniq)*1.2), 4))
-                data_bx = [df_w[df_w[wg_col]==g][wv_col].dropna().values for g in groups_w_uniq]
+                fig_w, ax_w = plt.subplots(figsize=(max(8, len(groups_w_uniq) * 1.2), 4))
+                data_bx = [df_w[df_w[wg_col] == g][wv_col].dropna().values for g in groups_w_uniq]
                 ax_w.boxplot(data_bx, labels=[str(g) for g in groups_w_uniq], showmeans=True)
-                ax_w.set_xlabel("Группа"); ax_w.set_ylabel("Масса тела")
-                ax_w.set_title("Масса тела по группам (финальное взвешивание)")
-                plt.tight_layout(); st.pyplot(fig_w); plt.close(fig_w)
+                ax_w.set_xlabel("Группа")
+                ax_w.set_ylabel(wv_col)
+                ax_w.set_title(f"«{wv_col}» по группам (дополнительная подвыборка)")
+                plt.tight_layout()
+                st.pyplot(fig_w)
+                plt.close(fig_w)
 
         if has_weight:
             weight_shifts_final = st.session_state.get("weight_shifts_final", None)
@@ -539,7 +593,10 @@ if "df_processed" in st.session_state:
         st.markdown("### 📋 Роли маркеров")
         st.caption("**M_E** — рост желателен. **M_S** — рост нежелателен. Один маркер — одна роль.")
         if weight_shifts_final is not None:
-            st.info("⚖️ Масса тела включена в M_E как дополнительный маркер (не отображается в таблице, обрабатывается по независимой выборке).")
+            st.info(
+                f"📎 Признак «{st.session_state.get('wv_col', '')}» из дополнительной подвыборки "
+                f"включён в M_E (обрабатывается по независимой выборке, не отображается в таблице ниже)."
+            )
 
         role_df = pd.DataFrame({"Маркер": sensitive_markers, "Роль": [guess_role(m) for m in sensitive_markers]})
         edited_roles = st.data_editor(role_df,
@@ -552,9 +609,12 @@ if "df_processed" in st.session_state:
         ms_selected = edited_roles[edited_roles["Роль"]=="M_S (безопасность/риск)"]["Маркер"].tolist()
 
         col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("M_E (биохимия)", len(me_selected))
+        col_m1.metric("M_E (осн. выборка)", len(me_selected))
         col_m2.metric("M_S", len(ms_selected))
-        col_m3.metric("Масса тела", "включена ✅" if weight_shifts_final else "не включена")
+        col_m3.metric(
+            "Доп. подвыборка",
+            f"«{st.session_state.get('wv_col','')}» ✅" if weight_shifts_final else "не подключена",
+        )
 
         # Критерий баланса
         st.markdown("### ⚖️ Критерий баланса (необязательно)")
@@ -586,7 +646,10 @@ if "df_processed" in st.session_state:
         use_bootstrap = col_bs1.checkbox("Включить бутстрэп по животным", value=False)
         n_boot = col_bs2.number_input("Число итераций", min_value=100, max_value=5000, value=1000, step=100)
         if use_bootstrap and has_weight and weight_shifts_final is not None:
-            st.caption("ℹ️ Бутстрэп проводит независимый ресэмплинг биохимических и весовых данных на каждой итерации.")
+            st.caption(
+                f"ℹ️ Бутстрэп проводит независимый ресэмплинг основной и дополнительной "
+                f"подвыборок на каждой итерации (признак «{st.session_state.get('wv_col','')}»)."
+            )
 
         # РАСЧЁТ
         if st.button("🚀 Рассчитать I_g и ранжировать группы", type="primary", key="calc_btn"):
@@ -619,9 +682,9 @@ if "df_processed" in st.session_state:
                             if has_weight and weight_shifts_final is not None:
                                 bstrap_kwargs = dict(
                                     df_weight=st.session_state.df_weight_raw,
-                                    weight_group_col=st.session_state.wg_col,
-                                    weight_col=st.session_state.wv_col,
-                                    control_group_w=st.session_state.control_group_w,
+                                    weight_group_col=st.session_state["wg_col"],
+                                    weight_col=st.session_state["wv_col"],
+                                    control_group_w=st.session_state["control_group_w"],
                                 )
                             I_boot = bootstrap_indices(
                                 df_clean, group_col, control_group, me_selected, ms_selected,
@@ -646,7 +709,11 @@ if "df_processed" in st.session_state:
             fig, axes = plt.subplots(1, n_plots, figsize=(6*n_plots, 5))
             if n_plots == 1: axes = [axes]
             axes[0].bar(x_pos, results["E_norm"], color="#2ecc71", alpha=0.85)
-            axes[0].set_title("E_norm — Эффективность" + (" (с массой)" if weight_shifts_final else ""), fontweight="bold")
+            _ext_label = st.session_state.get("wv_col", "")
+            axes[0].set_title(
+                "E_norm — Эффективность" + (f" (+ «{_ext_label}»)" if weight_shifts_final and _ext_label else ""),
+                fontweight="bold",
+            )
             axes[0].set_xticks(x_pos); axes[0].set_xticklabels(x_labels, rotation=40, ha="right")
             axes[1].bar(x_pos, results["S_norm"], color="#e74c3c", alpha=0.85)
             axes[1].set_title("S_norm — Риск", fontweight="bold")
@@ -730,7 +797,10 @@ if "df_processed" in st.session_state:
                     random_level = 1/len(test_groups)
                     st.success(f"📌 **Лучшая опытная группа по бутстрэпу: {best_dose}**  (P={probs_dose[best_dose]:.2f} > случайный уровень {random_level:.2f})")
                     if weight_shifts_final is not None:
-                        st.caption("Бутстрэп проводился с независимым ресэмплингом биохимических и весовых данных на каждой итерации.")
+                        st.caption(
+                            f"Бутстрэп проводился с независимым ресэмплингом основной "
+                            f"и дополнительной подвыборок «{st.session_state.get('wv_col','')}» на каждой итерации."
+                        )
 
                 fig_bs, ax_bs = plt.subplots(figsize=(max(8, len(groups_bs)*1.2), 5))
                 ax_bs.boxplot([I_boot[g] for g in groups_bs], labels=[str(g) for g in groups_bs], showmeans=True)
@@ -758,9 +828,6 @@ else:
 
 **Об учёте массы тела:** файл массы может содержать данных других особей, нежели основной файл — это корректно, если обе подвыборки случайны из одной группы. KW-тест проверяет значимость; при p < α масса автоматически добавляется в критерий эффективности. При бутстрэпе оба набора данных ресэмплируются независимо.
 """)
-
-st.markdown("---")
-st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
 
 st.markdown("---")
 st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
