@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,51 +8,24 @@ import seaborn as sns
 import re
 import statsmodels.api as sm
 
-# ======================
-# КОНФИГУРАЦИЯ
-# ======================
-st.set_page_config(
-    page_title="GroupRanker Pro",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="GroupRanker Pro", layout="wide", initial_sidebar_state="expanded")
 st.title("🎯 GroupRanker Pro")
 st.markdown("**Универсальная модель многокритериального ранжирования экспериментальных групп**")
 st.caption("Поддерживает: дозозависимые эксперименты, факторный дизайн, комбинированные добавки")
 
-# ======================
-# АВТОПОДСКАЗКИ РОЛИ МАРКЕРОВ
-# ======================
 MS_HINTS = [
-    # Токсичные элементы
-    "pb", "cd", "hg", "as", "al", "be", "sn", "свинец", "кадмий", "ртуть",
-    "мышьяк", "олово", "бериллий", "алюминий",
-    # Маркеры стресса и патологии
-    "глюкоз", "glucos", "холестерин", "cholesterol", "триглицерид", "triglycerid",
-    "alt", "ast", "алт", "аст", "алп", "alp",
-    "билирубин", "bilirubin", "креатинин", "creatinin",
-    "лейкоцит", "leukocyt", "wbc",
-    "мочевин", "urea", "мочев",
-    # Прочие риски
-    "cortisol", "кортизол", "toxic", "токсич",
+    "pb","cd","hg","as","al","be","sn","свинец","кадмий","ртуть","мышьяк","олово","бериллий","алюминий",
+    "глюкоз","glucos","холестерин","cholesterol","триглицерид","triglycerid",
+    "alt","ast","алт","аст","алп","alp","билирубин","bilirubin","креатинин","creatinin",
+    "лейкоцит","leukocyt","wbc","мочевин","urea","мочев","cortisol","кортизол","toxic","токсич",
 ]
-
 ME_HINTS = [
-    # Продуктивность
-    "weight", "масса", "прирост", "gain", "живая",
-    # Белковый статус
-    "белок", "protein", "albumin", "альбумин",
-    # Кровь
-    "hgb", "гемоглобин", "hemoglobin", "rbc", "эритроцит",
-    "гематокрит", "hematocrit", "тромбоцит", "platelet",
-    # Антиоксиданты и ферменты
-    "sod", "cat", "каталаз", "глутатион", "glutathion",
-    # Эссенциальные элементы (мышцы)
-    "fe_", "zn_", "cu_", "se_", "железо_мышц", "цинк_мышц",
+    "weight","масса","прирост","gain","живая","белок","protein","albumin","альбумин",
+    "hgb","гемоглобин","hemoglobin","rbc","эритроцит","гематокрит","hematocrit","тромбоцит","platelet",
+    "sod","cat","каталаз","глутатион","glutathion","fe_","zn_","cu_","se_","железо_мышц","цинк_мышц",
 ]
 
-
-def guess_role(col_name: str) -> str:
+def guess_role(col_name):
     col_lower = col_name.lower()
     for hint in MS_HINTS:
         if hint in col_lower:
@@ -62,39 +33,31 @@ def guess_role(col_name: str) -> str:
     for hint in ME_HINTS:
         if hint in col_lower:
             return "M_E (эффективность)"
-    return "M_E (эффективность)"  # нейтральный дефолт
+    return "M_E (эффективность)"
 
-
-# ======================
-# ПРЕДОБРАБОТКА
-# ======================
-def safe_numeric(col, lod: float = 0.00005) -> pd.Series:
+def safe_numeric(col, lod=0.00005):
     s = col.astype(str).str.strip()
-
     def extract_censored(val):
         if "<" in str(val):
             return lod * np.random.uniform(0.8, 1.2)
         return val
-
     s = s.apply(extract_censored)
     s = s.str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
     return pd.to_numeric(s, errors="coerce")
 
-
-def winsorize_feature(series: pd.Series, limits=(0.05, 0.95)) -> pd.Series:
+def winsorize_feature(series, limits=(0.05, 0.95)):
     data = series.dropna()
     if len(data) > 5:
         lower, upper = data.quantile(limits)
         return series.clip(lower=lower, upper=upper)
     return series
 
-
-def visualize_outliers(df: pd.DataFrame, features: list):
+def visualize_outliers(df, features):
     st.subheader("🔍 Анализ выбросов")
     n_cols = min(3, len(features))
     for i in range(0, len(features), n_cols):
         cols = st.columns(n_cols)
-        for j, feature in enumerate(features[i : i + n_cols]):
+        for j, feature in enumerate(features[i:i+n_cols]):
             if j < len(cols):
                 with cols[j]:
                     fig, ax = plt.subplots(figsize=(5, 3))
@@ -106,155 +69,139 @@ def visualize_outliers(df: pd.DataFrame, features: list):
                     st.pyplot(fig)
                     plt.close(fig)
 
-
-# ======================
-# ШАГ 2: АНАЛИЗ ЗНАЧИМОСТИ
-# ======================
-def compute_group_sensitivity(
-    df: pd.DataFrame,
-    group_col: str,
-    features: list,
-    alpha: float = 0.05,
-    mode: str = "group",
-) -> pd.DataFrame:
+def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group"):
     results = []
     for feature in features:
         x = df[feature].dropna()
         grp_vals = df.loc[x.index, group_col]
-
         if len(x) < 4 or grp_vals.nunique() < 2:
             continue
-
-        # 1. Kruskal-Wallis
         groups_list = [v.values for _, v in x.groupby(grp_vals)]
         try:
             p_kw = stats.kruskal(*groups_list)[1] if len(groups_list) > 1 else 1.0
         except Exception:
             p_kw = 1.0
-
         rho, p_spear, p_quad = np.nan, np.nan, np.nan
-
         if mode == "dose":
-            # 2. Спирмен
             try:
                 rho, p_spear = stats.spearmanr(grp_vals.astype(float), x)
             except Exception:
                 pass
-
-            # 3. Квадратичная регрессия
             if grp_vals.nunique() > 3:
                 try:
                     d = grp_vals.astype(float)
-                    X = sm.add_constant(pd.DataFrame({"d": d, "d2": d ** 2}))
+                    X = sm.add_constant(pd.DataFrame({"d": d, "d2": d**2}))
                     model = sm.OLS(x, X).fit()
                     p_quad = model.pvalues.get("d2", 1.0)
                 except Exception:
                     pass
-
         if mode == "dose":
-            is_sensitive = (p_kw < alpha) or (
-                not np.isnan(p_spear) and p_spear < alpha and abs(rho) > 0.5
-            ) or (not np.isnan(p_quad) and p_quad < alpha)
+            is_sensitive = (p_kw < alpha) or (not np.isnan(p_spear) and p_spear < alpha and abs(rho) > 0.5) or (not np.isnan(p_quad) and p_quad < alpha)
         else:
             is_sensitive = p_kw < alpha
-
-        results.append(
-            {
-                "Маркер": feature,
-                "p (KW)": round(p_kw, 4),
-                "ρ Спирмен": round(rho, 3) if not np.isnan(rho) else "—",
-                "p (Spear)": round(p_spear, 4) if not np.isnan(p_spear) else "—",
-                "p (квадр.)": round(p_quad, 4) if not np.isnan(p_quad) else "—",
-                "Значимый": is_sensitive,
-            }
-        )
+        results.append({
+            "Маркер": feature,
+            "p (KW)": round(p_kw, 4),
+            "ρ Спирмен": round(rho, 3) if not np.isnan(rho) else "—",
+            "p (Spear)": round(p_spear, 4) if not np.isnan(p_spear) else "—",
+            "p (квадр.)": round(p_quad, 4) if not np.isnan(p_quad) else "—",
+            "Значимый": is_sensitive,
+        })
     return pd.DataFrame(results)
 
+# ── МАССА ТЕЛА ──────────────────────────────────────────────────────────────
+def compute_weight_kw_and_shifts(df_weight, weight_group_col, weight_col, control_group, alpha=0.05):
+    """
+    KW-тест и нормированные сдвиги медианы массы по группам.
+    Возвращает: p_kw, shifts (dict | None), summary (DataFrame).
+    
+    Обе подвыборки (масса и биохимия) являются независимыми случайными
+    выборками из одной группы, поэтому групповые медианы массы — несмещённые
+    оценки параметра генеральной совокупности группы.
+    """
+    df_w = df_weight[[weight_group_col, weight_col]].copy()
+    df_w[weight_col] = safe_numeric(df_w[weight_col])
+    df_w = df_w.dropna()
 
-# ======================
-# ШАГ 3А: КРИТЕРИЙ ЭФФЕКТИВНОСТИ
-# ======================
-def compute_efficiency(
-    df: pd.DataFrame,
-    group_col: str,
-    control_group,
-    me_markers: list,
-) -> dict:
+    groups = df_w[weight_group_col].unique()
+    groups_data = [df_w[df_w[weight_group_col] == g][weight_col].values for g in groups]
+    try:
+        p_kw = stats.kruskal(*groups_data)[1] if len(groups_data) > 1 else 1.0
+    except Exception:
+        p_kw = 1.0
+
+    summary_rows = []
+    for g in groups:
+        vals = df_w[df_w[weight_group_col] == g][weight_col]
+        summary_rows.append({"Группа": g, "n": len(vals),
+                              "Медиана": round(vals.median(), 2),
+                              "IQR": round(vals.quantile(0.75) - vals.quantile(0.25), 2)})
+    summary = pd.DataFrame(summary_rows)
+
+    if p_kw >= alpha:
+        return p_kw, None, summary
+
+    all_vals = df_w[weight_col]
+    iqr_all = all_vals.quantile(0.75) - all_vals.quantile(0.25)
+    if iqr_all == 0:
+        return p_kw, None, summary
+
+    ctrl_med = df_w[df_w[weight_group_col] == control_group][weight_col].median()
+    shifts = {}
+    for g in df_w[weight_group_col].unique():
+        g_med = df_w[df_w[weight_group_col] == g][weight_col].median()
+        shifts[g] = (g_med - ctrl_med) / iqr_all
+    return p_kw, shifts, summary
+
+# ── КРИТЕРИИ ────────────────────────────────────────────────────────────────
+def compute_efficiency(df, group_col, control_group, me_markers, weight_shifts=None):
+    """
+    E_g = медиана нормированных сдвигов маркеров M_E.
+    weight_shifts: dict {group: delta_weight} | None
+        Если передан, сдвиг по массе добавляется к сдвигам биохимических маркеров
+        (Вариант А: масса как дополнительный маркер M_E).
+        Вычисляется по независимой весовой подвыборке.
+    """
     ctrl_data = df[df[group_col] == control_group]
     E_vals = {}
-
     for group in df[group_col].unique():
         grp_data = df[df[group_col] == group]
         shifts = []
-
         for m in me_markers:
             g_vals = grp_data[m].dropna()
             c_vals = ctrl_data[m].dropna()
-
             if len(g_vals) == 0 or len(c_vals) == 0:
                 continue
-
             iqr_m = df[m].quantile(0.75) - df[m].quantile(0.25)
             if iqr_m == 0:
                 continue
-
-            shift = (g_vals.median() - c_vals.median()) / iqr_m
-            shifts.append(shift)
-
+            shifts.append((g_vals.median() - c_vals.median()) / iqr_m)
+        if weight_shifts is not None and group in weight_shifts:
+            shifts.append(weight_shifts[group])
         E_vals[group] = float(np.nanmedian(shifts)) if shifts else 0.0
-
     return E_vals
 
-
-# ======================
-# ШАГ 3Б: КРИТЕРИЙ БЕЗОПАСНОСТИ (РИСКА)
-# ======================
-def compute_safety(
-    df: pd.DataFrame,
-    group_col: str,
-    control_group,
-    ms_markers: list,
-) -> dict:
+def compute_safety(df, group_col, control_group, ms_markers):
     ctrl_data = df[df[group_col] == control_group]
     S_vals = {}
-
     for group in df[group_col].unique():
         grp_data = df[df[group_col] == group]
         risks = []
-
         for m in ms_markers:
             g_vals = grp_data[m].dropna()
             c_vals = ctrl_data[m].dropna()
-
             if len(g_vals) == 0 or len(c_vals) == 0:
                 continue
-
             iqr_m = df[m].quantile(0.75) - df[m].quantile(0.25)
             if iqr_m == 0:
                 continue
-
-            shift = (g_vals.median() - c_vals.median()) / iqr_m
-            risk = max(0.0, shift)
-            risks.append(risk)
-
+            risks.append(max(0.0, (g_vals.median() - c_vals.median()) / iqr_m))
         S_vals[group] = float(np.nanmedian(risks)) if risks else 0.0
-
     return S_vals
 
-
-# ======================
-# ШАГ 3В: КРИТЕРИЙ БАЛАНСА (УНИВЕРСАЛЬНЫЙ)
-# ======================
-def compute_balance_criterion(
-    df: pd.DataFrame,
-    group_col: str,
-    control_group,
-    balance_ratios: list,
-    features: list,
-) -> dict:
+def compute_balance_criterion(df, group_col, control_group, balance_ratios, features):
     B_vals = {}
     eps = 1e-8
-
     for group in df[group_col].unique():
         deviations = []
         for ratio_str in balance_ratios:
@@ -262,43 +209,27 @@ def compute_balance_criterion(
             if "/" not in ratio_str:
                 continue
             num_base, den_base = [x.strip() for x in ratio_str.split("/", 1)]
-
             num_cols = [c for c in features if num_base.lower() in c.lower()]
             for nc in num_cols:
                 loc_match = re.search(r"(_[a-z]+)$", nc.lower())
                 loc_suffix = loc_match.group(1) if loc_match else ""
-
-                dc_candidates = [
-                    c for c in features
-                    if den_base.lower() in c.lower() and c.lower().endswith(loc_suffix)
-                ]
+                dc_candidates = [c for c in features if den_base.lower() in c.lower() and c.lower().endswith(loc_suffix)]
                 if not dc_candidates:
                     continue
                 dc = dc_candidates[0]
-
                 grp_data = df[df[group_col] == group]
                 ctrl_data = df[df[group_col] == control_group]
-
                 if grp_data.empty or ctrl_data.empty:
                     continue
-
                 d_ratio = (grp_data[nc] / (grp_data[dc] + eps)).median()
                 c_ratio = (ctrl_data[nc] / (ctrl_data[dc] + eps)).median()
-                all_r = df[nc] / (df[dc] + eps)
-                iqr_r = all_r.quantile(0.75) - all_r.quantile(0.25)
-
+                iqr_r = (df[nc] / (df[dc] + eps)).quantile(0.75) - (df[nc] / (df[dc] + eps)).quantile(0.25)
                 if iqr_r > 0:
                     deviations.append(abs((d_ratio - c_ratio) / iqr_r))
-
         B_vals[group] = -np.nanmedian(deviations) if deviations else 0.0
-
     return B_vals
 
-
-# ======================
-# УТИЛИТЫ
-# ======================
-def normalize_dict(d: dict) -> dict:
+def normalize_dict(d):
     vals = [v for v in d.values() if not pd.isna(v)]
     if not vals:
         return {k: 0.5 for k in d}
@@ -307,191 +238,163 @@ def normalize_dict(d: dict) -> dict:
         return {k: 0.5 for k in d}
     return {k: (v - vmin) / (vmax - vmin) for k, v in d.items()}
 
-
 def safe_rerun():
     try:
         st.rerun()
     except AttributeError:
         st.experimental_rerun()
 
-
-# ======================
-# БУТСТРЭП ДЛЯ I_g
-# ======================
-def bootstrap_indices(
-    df: pd.DataFrame,
-    group_col: str,
-    control_group,
-    me_markers: list,
-    ms_markers: list,
-    balance_ratios: list,
-    features: list,
-    w_E: float,
-    w_S: float,
-    w_B: float,
-    n_boot: int = 1000,
-    random_state: int = 42,
-) -> dict:
+# ── БУТСТРЭП ────────────────────────────────────────────────────────────────
+def bootstrap_indices(df, group_col, control_group, me_markers, ms_markers,
+                      balance_ratios, features, w_E, w_S, w_B,
+                      n_boot=1000, random_state=42,
+                      df_weight=None, weight_group_col=None,
+                      weight_col=None, control_group_w=None):
     """
     Бутстрэп по объектам внутри каждой группы.
-    На каждом шаге:
-      - ресэмплинг строк с возвращением в каждой группе,
-      - пересчёт E_g, S_g, B_g и I_g.
-    Возвращает словарь: group -> список значений I_g (длина n_boot).
+
+    Если переданы df_weight и связанные параметры, весовые данные
+    ресэмплируются НЕЗАВИСИМО от биохимических на каждой итерации.
+    Это корректно: обе подвыборки случайны и независимы, но из одной группы.
     """
     rng = np.random.default_rng(random_state)
     groups = sorted(df[group_col].dropna().unique())
     group_data = {g: df[df[group_col] == g] for g in groups}
 
-    w_total = w_E + w_S + w_B
-    if w_total == 0:
-        w_E_n = w_S_n = w_B_n = 0.0
-    else:
-        w_E_n, w_S_n, w_B_n = w_E / w_total, w_S / w_total, w_B / w_total
+    use_weight = (df_weight is not None and weight_group_col is not None
+                  and weight_col is not None and control_group_w is not None)
+    iqr_weight_global = 0
+    weight_group_data = {}
+    if use_weight:
+        all_w = df_weight[weight_col].dropna()
+        iqr_weight_global = all_w.quantile(0.75) - all_w.quantile(0.25)
+        for g in df_weight[weight_group_col].unique():
+            weight_group_data[g] = df_weight[df_weight[weight_group_col] == g][weight_col].dropna().values
 
+    w_total = w_E + w_S + w_B
+    w_E_n, w_S_n, w_B_n = (w_E/w_total, w_S/w_total, w_B/w_total) if w_total > 0 else (1.0, 0.0, 0.0)
     I_boot = {g: [] for g in groups}
 
     for _ in range(int(n_boot)):
-        # Бутстрэп-выборка
-        df_b = []
-        for g in groups:
-            g_df = group_data[g]
-            if len(g_df) == 0:
-                continue
-            idx = rng.integers(0, len(g_df), size=len(g_df))
-            df_b.append(g_df.iloc[idx])
-        df_b = pd.concat(df_b, axis=0)
+        df_b = pd.concat([
+            g_df.iloc[rng.integers(0, len(g_df), size=len(g_df))]
+            for g, g_df in group_data.items() if len(g_df) > 0
+        ], axis=0)
 
-        # Пересчёт критериев на бутстрэп-выборке
-        E_vals_b = compute_efficiency(df_b, group_col, control_group, me_markers)
-        if ms_markers:
-            S_vals_b = compute_safety(df_b, group_col, control_group, ms_markers)
-        else:
-            S_vals_b = {g: 0.0 for g in groups}
-        if balance_ratios:
-            B_vals_b = compute_balance_criterion(df_b, group_col, control_group, balance_ratios, features)
-        else:
-            B_vals_b = {g: 0.0 for g in groups}
+        weight_shifts_b = None
+        if use_weight and iqr_weight_global > 0:
+            ctrl_w = weight_group_data.get(control_group_w, np.array([]))
+            if len(ctrl_w) > 0:
+                ctrl_w_med = np.median(ctrl_w[rng.integers(0, len(ctrl_w), size=len(ctrl_w))])
+                weight_shifts_b = {}
+                for g in groups:
+                    g_w = weight_group_data.get(g, np.array([]))
+                    if len(g_w) > 0:
+                        g_w_med = np.median(g_w[rng.integers(0, len(g_w), size=len(g_w))])
+                        weight_shifts_b[g] = (g_w_med - ctrl_w_med) / iqr_weight_global
 
-        E_n_b = normalize_dict(E_vals_b)
-        S_n_b = normalize_dict(S_vals_b)
-        B_n_b = normalize_dict(B_vals_b)
+        E_n_b = normalize_dict(compute_efficiency(df_b, group_col, control_group, me_markers, weight_shifts_b))
+        S_n_b = normalize_dict(compute_safety(df_b, group_col, control_group, ms_markers) if ms_markers else {g: 0.0 for g in groups})
+        B_n_b = normalize_dict(compute_balance_criterion(df_b, group_col, control_group, balance_ratios, features) if balance_ratios else {g: 0.0 for g in groups})
 
         for g in groups:
-            I_g = (
-                w_E_n * E_n_b.get(g, 0.5)
-                - w_S_n * S_n_b.get(g, 0.5)
-                + w_B_n * B_n_b.get(g, 0.5)
-            )
-            I_boot[g].append(I_g)
+            I_boot[g].append(w_E_n * E_n_b.get(g, 0.5) - w_S_n * S_n_b.get(g, 0.5) + w_B_n * B_n_b.get(g, 0.5))
 
     return I_boot
 
-
-# ======================
-# БОКОВАЯ ПАНЕЛЬ: ЗАГРУЗКА И КОНФИГУРАЦИЯ
-# ======================
+# ══════════════════════════════════════════════════════════════════════════════
+# БОКОВАЯ ПАНЕЛЬ
+# ══════════════════════════════════════════════════════════════════════════════
 st.sidebar.header("📁 Загрузка данных")
-uploaded_file = st.sidebar.file_uploader("CSV или Excel", type=["csv", "xlsx"])
+uploaded_file = st.sidebar.file_uploader("CSV/Excel — основные данные (биохимия, элементы)", type=["csv","xlsx"], key="main_file")
 
+st.sidebar.markdown("---")
+st.sidebar.header("⚖️ Масса тела (опционально)")
+st.sidebar.caption("Отдельный файл: строки = особи, столбцы = группа + масса финального взвешивания. Особи могут не совпадать с основным файлом.")
+weight_file = st.sidebar.file_uploader("CSV/Excel — масса тела", type=["csv","xlsx"], key="weight_file")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ЗАГРУЗКА ОСНОВНОГО ФАЙЛА
+# ══════════════════════════════════════════════════════════════════════════════
 if uploaded_file is not None:
     try:
-        if uploaded_file.name.endswith(".csv"):
-            df_raw = pd.read_csv(uploaded_file, sep=None, decimal=",", engine="python")
-        else:
-            df_raw = pd.read_excel(uploaded_file)
-
+        df_raw = pd.read_csv(uploaded_file, sep=None, decimal=",", engine="python") if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
         st.session_state.df_raw = df_raw
-        st.success(f"✅ Загружено: {len(df_raw)} строк × {len(df_raw.columns)} столбцов")
+        st.success(f"✅ Основной файл: {len(df_raw)} строк × {len(df_raw.columns)} столбцов")
         st.dataframe(df_raw.head(), use_container_width=True)
 
-        # ── Режим эксперимента ──────────────────────────────────────────────
-        st.sidebar.header("🧪 Тип дизайна эксперимента")
-        exp_mode = st.sidebar.radio(
-            "Структура опытных групп",
-            [
-                "🔢 Числовые дозы (доза-ответ)",
-                "🏷️ Категориальные группы (факторный / комбинации добавок)",
-            ],
-            help=(
-                "Числовые дозы: группы различаются количеством одного вещества (0, 0.2, 0.4 мг/кг). "
-                "Категориальные: группы — разные комбинации добавок без единого числового параметра."
-            ),
-        )
+        st.sidebar.header("🧪 Тип дизайна")
+        exp_mode = st.sidebar.radio("Структура опытных групп",
+            ["🔢 Числовые дозы (доза-ответ)", "🏷️ Категориальные группы (факторный / комбинации добавок)"])
         is_dose_mode = exp_mode.startswith("🔢")
 
-        # ── Столбец групп ────────────────────────────────────────────────────
-        st.sidebar.header("⚙️ Столбцы")
-        group_col_name = st.sidebar.selectbox(
-            "Столбец с группами" + (" (дозы)" if is_dose_mode else " (метки)"),
-            df_raw.columns,
-        )
+        st.sidebar.header("⚙️ Столбцы основного файла")
+        group_col_name = st.sidebar.selectbox("Столбец с группами" + (" (дозы)" if is_dose_mode else " (метки)"), df_raw.columns)
 
-        # Создаём служебный столбец _group
         if is_dose_mode:
             group_raw = safe_numeric(df_raw[group_col_name])
             if group_raw.isna().all():
-                st.error("❌ Столбец доз не содержит числовых значений!")
-                st.stop()
+                st.error("❌ Столбец доз не содержит числовых значений!"); st.stop()
             df_raw["_group"] = group_raw
             unique_groups = sorted(df_raw["_group"].dropna().unique())
         else:
             df_raw["_group"] = df_raw[group_col_name].astype(str).str.strip()
             unique_groups = sorted(df_raw["_group"].dropna().unique(), key=str)
 
-        st.sidebar.markdown(
-            f"**Найдено групп ({len(unique_groups)}):** " + ", ".join(str(g) for g in unique_groups)
-        )
+        st.sidebar.markdown(f"**Групп ({len(unique_groups)}):** " + ", ".join(str(g) for g in unique_groups))
+        control_group = st.sidebar.selectbox("🎯 Контрольная группа", options=unique_groups, index=0)
 
-        # Контрольная группа
-        control_group = st.sidebar.selectbox(
-            "🎯 Контрольная группа (эталон)",
-            options=unique_groups,
-            index=0,
-        )
-
-        # Числовые признаки для анализа
         exclude_cols = {"_group", group_col_name}
-        all_numeric = [
-            c for c in df_raw.select_dtypes(include=[np.number]).columns
-            if c not in exclude_cols
-        ]
-        features = st.sidebar.multiselect(
-            "📊 Признаки для анализа",
-            all_numeric,
-            default=all_numeric[: min(20, len(all_numeric))],
-        )
+        all_numeric = [c for c in df_raw.select_dtypes(include=[np.number]).columns if c not in exclude_cols]
+        features = st.sidebar.multiselect("📊 Признаки для анализа", all_numeric, default=all_numeric[:min(20, len(all_numeric))])
 
         if st.sidebar.button("🚀 Запустить анализ", type="primary") and features:
             df_processed = df_raw.copy()
             for col in features:
                 df_processed[col] = safe_numeric(df_raw[col])
-
-            # Сохраняем состояние
             st.session_state.df_processed = df_processed
             st.session_state.features = features
             st.session_state.group_col = "_group"
             st.session_state.control_group = control_group
             st.session_state.unique_groups = unique_groups
             st.session_state.is_dose_mode = is_dose_mode
-
-            # Сбрасываем результаты предыдущего запуска
-            for key in ["df_clean", "group_stats", "results", "I_boot"]:
+            for key in ["df_clean","group_stats","results","I_boot","weight_shifts_final","p_kw_weight","weight_summary"]:
                 st.session_state.pop(key, None)
-
             st.success("✅ Данные подготовлены!")
             safe_rerun()
-
     except Exception as e:
         import traceback
-        st.error(f"❌ Ошибка загрузки: {e}")
-        st.code(traceback.format_exc())
-        st.stop()
+        st.error(f"❌ Ошибка загрузки: {e}"); st.code(traceback.format_exc()); st.stop()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ЗАГРУЗКА ФАЙЛА МАССЫ
+# ══════════════════════════════════════════════════════════════════════════════
+if weight_file is not None:
+    try:
+        df_wraw = pd.read_csv(weight_file, sep=None, decimal=",", engine="python") if weight_file.name.endswith(".csv") else pd.read_excel(weight_file)
+        st.sidebar.success(f"✅ Масса: {len(df_wraw)} строк")
+        st.session_state.df_weight_raw = df_wraw
 
-# ======================
-# ГЛАВНЫЙ АНАЛИЗ — запускается только после загрузки
-# ======================
+        st.sidebar.markdown("**Столбцы файла массы:**")
+        wg_col_name = st.sidebar.selectbox("Столбец с группами (масса)", df_wraw.columns, key="wg_col")
+        wv_col_name = st.sidebar.selectbox("Столбец с массой тела", [c for c in df_wraw.columns if c != wg_col_name], key="wv_col")
+
+        df_wraw["_wgroup"] = df_wraw[wg_col_name].astype(str).str.strip()
+        unique_wgroups = sorted(df_wraw["_wgroup"].dropna().unique(), key=str)
+        st.sidebar.markdown(f"Групп в файле массы: **{len(unique_wgroups)}** — " + ", ".join(str(g) for g in unique_wgroups))
+        control_group_w = st.sidebar.selectbox("Контрольная группа (файл массы)", options=unique_wgroups, index=0, key="ctrl_w")
+
+        st.session_state.df_weight_raw = df_wraw
+        st.session_state.wg_col = "_wgroup"
+        st.session_state.wv_col = wv_col_name
+        st.session_state.control_group_w = control_group_w
+    except Exception as e:
+        import traceback
+        st.sidebar.error(f"❌ Ошибка файла массы: {e}"); st.sidebar.code(traceback.format_exc())
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ГЛАВНЫЙ АНАЛИЗ
+# ══════════════════════════════════════════════════════════════════════════════
 if "df_processed" in st.session_state:
     df = st.session_state.df_processed
     features = st.session_state.features
@@ -500,10 +403,9 @@ if "df_processed" in st.session_state:
     unique_groups = st.session_state.unique_groups
     is_dose_mode = st.session_state.is_dose_mode
     mode_str = "dose" if is_dose_mode else "group"
-
     st.markdown("---")
 
-    # ── ШАГ 1: Выбросы ──────────────────────────────────────────────────────
+    # ШАГ 1
     st.header("🔍 Шаг 1 — Анализ и обработка выбросов")
     col_a, col_b = st.columns([3, 1])
     with col_a:
@@ -511,40 +413,27 @@ if "df_processed" in st.session_state:
             visualize_outliers(df, features)
     with col_b:
         outlier_method = st.radio("Метод", ["none (не трогать)", "winsorize (5%–95%)"])
-
     if st.button("⚙️ Применить и перейти к анализу"):
         df_clean = df.copy()
         if "winsorize" in outlier_method:
             for feat in features:
                 df_clean[feat] = winsorize_feature(df_clean[feat])
         st.session_state.df_clean = df_clean
-        st.success("✅ Готово!")
-        safe_rerun()
+        st.success("✅ Готово!"); safe_rerun()
 
-    # ── ШАГ 2: Значимость признаков ─────────────────────────────────────────
+    # ШАГ 2
     if "df_clean" in st.session_state:
         df_clean = st.session_state.df_clean
         st.markdown("---")
-
+        st.header("🔬 Шаг 2 — " + ("Дозозависимость маркеров" if is_dose_mode else "Значимость различий между группами"))
         if is_dose_mode:
-            st.header("🔬 Шаг 2 — Дозозависимость маркеров")
             st.caption("Kruskal-Wallis + ранговая корреляция Спирмена + квадратичная регрессия")
         else:
-            st.header("🔬 Шаг 2 — Значимость различий между группами")
-            st.caption(
-                "Критерий Краскела-Уоллиса для каждого маркера. "
-                "Тренд и квадратичная регрессия не применяются: группы категориальные."
-            )
-
+            st.caption("Критерий Краскела–Уоллиса для каждого маркера.")
         alpha_val = st.slider("Уровень значимости α", 0.01, 0.20, 0.05, 0.01)
-
         if st.button("📊 Рассчитать значимость", key="sens_btn"):
             with st.spinner("Анализ..."):
-                group_stats = compute_group_sensitivity(
-                    df_clean, group_col, features, alpha=alpha_val, mode=mode_str
-                )
-                st.session_state.group_stats = group_stats
-
+                st.session_state.group_stats = compute_group_sensitivity(df_clean, group_col, features, alpha=alpha_val, mode=mode_str)
         if "group_stats" in st.session_state:
             gs = st.session_state.group_stats
             sensitive = gs[gs["Значимый"]]
@@ -557,402 +446,321 @@ if "df_processed" in st.session_state:
                 st.dataframe(gs, use_container_width=True)
             st.metric("Значимых / всего", f"{len(sensitive)} / {len(features)}")
 
-    # ── ШАГ 3: Многокритериальный анализ ────────────────────────────────────
+    # ШАГ 3
     if "group_stats" in st.session_state:
         st.markdown("---")
         st.header("🎯 Шаг 3 — Многокритериальное ранжирование групп")
-
         df_clean = st.session_state.df_clean
         gs = st.session_state.group_stats
-
-        # 3.1 Начальный список: значимые маркеры
         sensitive_markers = gs[gs["Значимый"]]["Маркер"].tolist()
         if not sensitive_markers:
             st.warning("⚠️ Значимых маркеров нет — используем все признаки")
             sensitive_markers = features
 
-        # 3.2 Корреляционный фильтр
+        # Корреляционный фильтр
         with st.expander("🔗 Фильтр мультиколлинеарности", expanded=True):
-            corr_threshold = st.slider(
-                "Порог корреляции Спирмена для удаления избыточных маркеров",
-                0.70, 1.00, 0.90, 0.05,
-                help="Из каждой пары с |r| выше порога удаляется второй маркер. "
-                     "Спирмен предпочтителен для малых выборок."
-            )
+            corr_threshold = st.slider("Порог корреляции Спирмена", 0.70, 1.00, 0.90, 0.05)
             corr_cols = [m for m in sensitive_markers if m in df_clean.columns]
             if len(corr_cols) > 1:
                 corr_matrix = df_clean[corr_cols].corr(method="spearman")
                 to_drop = set()
                 for i in range(len(corr_cols)):
-                    for j in range(i + 1, len(corr_cols)):
+                    for j in range(i+1, len(corr_cols)):
                         if abs(corr_matrix.iloc[i, j]) > corr_threshold:
                             to_drop.add(corr_cols[j])
                 sensitive_markers = [c for c in corr_cols if c not in to_drop]
                 if to_drop:
-                    st.info(
-                        f"Удалено {len(to_drop)} маркеров (|r| > {corr_threshold}). "
-                        f"Осталось **{len(sensitive_markers)}** маркеров."
-                    )
+                    st.info(f"Удалено {len(to_drop)} маркеров (|r|>{corr_threshold}). Осталось **{len(sensitive_markers)}**.")
                     with st.expander("Тепловая карта корреляций"):
-                        fig_corr, ax_corr = plt.subplots(
-                            figsize=(max(6, len(corr_cols)*0.6), max(5, len(corr_cols)*0.5))
-                        )
-                        sns.heatmap(
-                            corr_matrix, annot=True, fmt=".2f", cmap="RdBu_r",
-                            center=0, ax=ax_corr, linewidths=0.5
-                        )
-                        plt.tight_layout()
-                        st.pyplot(fig_corr)
-                        plt.close(fig_corr)
+                        fig_corr, ax_corr = plt.subplots(figsize=(max(6, len(corr_cols)*0.6), max(5, len(corr_cols)*0.5)))
+                        sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="RdBu_r", center=0, ax=ax_corr, linewidths=0.5)
+                        plt.tight_layout(); st.pyplot(fig_corr); plt.close(fig_corr)
                 else:
                     st.info("Сильно коррелирующих маркеров не обнаружено.")
 
-        # 3.3 Назначение ролей маркеров
+        # ── БЛОК МАССЫ ТЕЛА ─────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### ⚖️ Масса тела")
+        has_weight = "df_weight_raw" in st.session_state
+
+        if not has_weight:
+            st.info("📂 Файл с данными о массе тела не загружен. Загрузите его в боковой панели, чтобы включить массу как дополнительный маркер эффективности.")
+            weight_shifts_final = None
+        else:
+            df_w = st.session_state.df_weight_raw
+            wg_col = st.session_state.wg_col
+            wv_col = st.session_state.wv_col
+            control_group_w = st.session_state.control_group_w
+
+            p_kw_w, shifts_w, summary_w = compute_weight_kw_and_shifts(df_w, wg_col, wv_col, control_group_w, alpha=alpha_val)
+
+            col_w1, col_w2 = st.columns(2)
+            with col_w1:
+                st.markdown("**Описательная статистика массы тела:**")
+                st.dataframe(summary_w, use_container_width=True)
+            with col_w2:
+                st.markdown(f"**KW-тест для массы:** p = {p_kw_w:.4f}")
+                if p_kw_w < alpha_val:
+                    st.success(f"✅ Различия значимы (p={p_kw_w:.4f}<{alpha_val}). Масса включается в M_E.")
+                else:
+                    st.warning(f"⚠️ Различия не значимы (p={p_kw_w:.4f}≥{alpha_val}). Масса исключена по критерию значимости.")
+
+            force_include = st.checkbox("Включить массу принудительно (игнорировать p-значение)", value=False,
+                help="Если различия биологически важны, но не достигли порога из-за малой выборки.")
+
+            if p_kw_w < alpha_val or force_include:
+                weight_shifts_final = shifts_w
+                if shifts_w:
+                    st.caption("Нормированные сдвиги медианы массы: " +
+                               ", ".join(f"{g}: {v:+.3f}" for g, v in sorted(shifts_w.items(), key=lambda x: str(x[0]))))
+                else:
+                    st.warning("Сдвиги по массе не вычислены (IQR=0 или нет данных контроля)."); weight_shifts_final = None
+            else:
+                weight_shifts_final = None
+
+            st.session_state.weight_shifts_final = weight_shifts_final
+
+            if st.button("📊 Боксплоты массы тела по группам"):
+                groups_w_uniq = sorted(df_w[wg_col].unique(), key=str)
+                fig_w, ax_w = plt.subplots(figsize=(max(8, len(groups_w_uniq)*1.2), 4))
+                data_bx = [df_w[df_w[wg_col]==g][wv_col].dropna().values for g in groups_w_uniq]
+                ax_w.boxplot(data_bx, labels=[str(g) for g in groups_w_uniq], showmeans=True)
+                ax_w.set_xlabel("Группа"); ax_w.set_ylabel("Масса тела")
+                ax_w.set_title("Масса тела по группам (финальное взвешивание)")
+                plt.tight_layout(); st.pyplot(fig_w); plt.close(fig_w)
+
+        if has_weight:
+            weight_shifts_final = st.session_state.get("weight_shifts_final", None)
+        else:
+            weight_shifts_final = None
+
+        # Назначение ролей
+        st.markdown("---")
         st.markdown("### 📋 Роли маркеров")
-        st.caption(
-            "**M_E (эффективность)** — маркеры, рост которых относительно контроля желателен: "
-            "цинкзависимые ферменты, антиоксиданты, эссенциальные элементы, продуктивность. "
-            "**M_S (безопасность/риск)** — маркеры, рост которых нежелателен: "
-            "токсичные элементы, маркеры стресса и патологии. "
-            "Один маркер — одна роль."
-        )
+        st.caption("**M_E** — рост желателен. **M_S** — рост нежелателен. Один маркер — одна роль.")
+        if weight_shifts_final is not None:
+            st.info("⚖️ Масса тела включена в M_E как дополнительный маркер (не отображается в таблице, обрабатывается по независимой выборке).")
 
-        role_df = pd.DataFrame({
-            "Маркер": sensitive_markers,
-            "Роль": [guess_role(m) for m in sensitive_markers],
-        })
-
-        edited_roles = st.data_editor(
-            role_df,
+        role_df = pd.DataFrame({"Маркер": sensitive_markers, "Роль": [guess_role(m) for m in sensitive_markers]})
+        edited_roles = st.data_editor(role_df,
             column_config={
                 "Маркер": st.column_config.TextColumn(disabled=True),
-                "Роль": st.column_config.SelectboxColumn(
-                    options=["M_E (эффективность)", "M_S (безопасность/риск)", "Игнорировать"]
-                ),
-            },
-            use_container_width=True,
-            hide_index=True,
-            key="role_editor",
-        )
+                "Роль": st.column_config.SelectboxColumn(options=["M_E (эффективность)", "M_S (безопасность/риск)", "Игнорировать"]),
+            }, use_container_width=True, hide_index=True, key="role_editor")
 
-        me_selected = edited_roles[edited_roles["Роль"] == "M_E (эффективность)"]["Маркер"].tolist()
-        ms_selected = edited_roles[edited_roles["Роль"] == "M_S (безопасность/риск)"]["Маркер"].tolist()
+        me_selected = edited_roles[edited_roles["Роль"]=="M_E (эффективность)"]["Маркер"].tolist()
+        ms_selected = edited_roles[edited_roles["Роль"]=="M_S (безопасность/риск)"]["Маркер"].tolist()
 
-        col_m1, col_m2 = st.columns(2)
-        col_m1.metric("M_E маркеров", len(me_selected))
-        col_m2.metric("M_S маркеров", len(ms_selected))
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("M_E (биохимия)", len(me_selected))
+        col_m2.metric("M_S", len(ms_selected))
+        col_m3.metric("Масса тела", "включена ✅" if weight_shifts_final else "не включена")
 
-        # 3.4 Критерий баланса (опционально)
+        # Критерий баланса
         st.markdown("### ⚖️ Критерий баланса (необязательно)")
-        use_balance = st.checkbox(
-            "Включить критерий баланса физиологических соотношений",
-            help="Оценивает, насколько соотношения элементов (Ca/P, Na/K, Zn/Cu) "
-                 "отклоняются от контроля. Требует, чтобы оба элемента соотношения "
-                 "присутствовали в данных."
-        )
+        use_balance = st.checkbox("Включить критерий баланса физиологических соотношений")
         balance_ratios = []
         if use_balance:
-            balance_input = st.text_area(
-                "Введите соотношения — одно на строку (числитель/знаменатель):",
-                placeholder="Ca/P\nNa/K\nZn/Cu\nCa/Fe",
-                height=110,
-            )
+            balance_input = st.text_area("Соотношения — одно на строку:", placeholder="Ca/P\nNa/K\nZn/Cu", height=110)
             balance_ratios = [r.strip() for r in balance_input.strip().split("\n") if "/" in r]
             if balance_ratios:
                 st.info(f"Соотношения: {', '.join(balance_ratios)}")
-            else:
-                st.warning("Введите хотя бы одно соотношение в формате 'A/B'")
 
-        # 3.5 Веса критериев
+        # Веса
         st.markdown("### 🎚️ Веса критериев")
         n_w = 3 if (use_balance and balance_ratios) else 2
         w_cols = st.columns(n_w)
         w_E = w_cols[0].slider("w₁ Эффективность", 0.0, 1.0, 0.5, 0.05, key="w_e")
-        w_S = w_cols[1].slider("w₂ Безопасность", 0.0, 1.0, 0.3 if n_w == 3 else 0.5, 0.05, key="w_s")
-        w_B = w_cols[2].slider("w₃ Баланс", 0.0, 1.0, 0.2, 0.05, key="w_b") if n_w == 3 else 0.0
-
+        w_S = w_cols[1].slider("w₂ Безопасность", 0.0, 1.0, 0.3 if n_w==3 else 0.5, 0.05, key="w_s")
+        w_B = w_cols[2].slider("w₃ Баланс", 0.0, 1.0, 0.2, 0.05, key="w_b") if n_w==3 else 0.0
         w_total = w_E + w_S + w_B
         if w_total > 0:
-            w_E_n, w_S_n, w_B_n = w_E / w_total, w_S / w_total, w_B / w_total
-            st.caption(
-                f"Нормализованные веса: E = {w_E_n:.2f} | S = {w_S_n:.2f} | B = {w_B_n:.2f}  "
-                f"→ I_g = w_E·E_norm − w_S·S_norm + w_B·B_norm"
-            )
+            w_E_n, w_S_n, w_B_n = w_E/w_total, w_S/w_total, w_B/w_total
+            st.caption(f"Нормализованные веса: E={w_E_n:.2f} | S={w_S_n:.2f} | B={w_B_n:.2f}  →  I_g = w_E·E_norm − w_S·S_norm + w_B·B_norm")
         else:
             w_E_n, w_S_n, w_B_n = 1.0, 0.0, 0.0
 
-        # 3.5a Бутстрэп-параметры
+        # Бутстрэп параметры
         st.markdown("### 🔁 Бутстрэп устойчивости I_g")
         col_bs1, col_bs2 = st.columns(2)
         use_bootstrap = col_bs1.checkbox("Включить бутстрэп по животным", value=False)
-        n_boot = col_bs2.number_input(
-            "Число итераций бутстрэпа",
-            min_value=100, max_value=5000, value=1000, step=100
-        )
+        n_boot = col_bs2.number_input("Число итераций", min_value=100, max_value=5000, value=1000, step=100)
+        if use_bootstrap and has_weight and weight_shifts_final is not None:
+            st.caption("ℹ️ Бутстрэп проводит независимый ресэмплинг биохимических и весовых данных на каждой итерации.")
 
-        # 3.6 Расчёт
+        # РАСЧЁТ
         if st.button("🚀 Рассчитать I_g и ранжировать группы", type="primary", key="calc_btn"):
-            if not me_selected:
-                st.error("❌ Добавьте хотя бы один маркер эффективности (роль M_E)!")
+            if not me_selected and weight_shifts_final is None:
+                st.error("❌ Добавьте хотя бы один маркер M_E или подключите данные о массе!")
             else:
                 with st.spinner("Расчёт..."):
-                    E_vals = compute_efficiency(
-                        df_clean, group_col, control_group, me_selected
-                    )
-                    S_vals = (
-                        compute_safety(
-                            df_clean, group_col, control_group, ms_selected
-                        )
-                        if ms_selected
-                        else {g: 0.0 for g in df_clean[group_col].unique()}
-                    )
-                    B_vals = (
-                        compute_balance_criterion(
-                            df_clean, group_col, control_group, balance_ratios, features
-                        )
-                        if (use_balance and balance_ratios)
-                        else {g: 0.0 for g in df_clean[group_col].unique()}
-                    )
+                    E_vals = compute_efficiency(df_clean, group_col, control_group, me_selected, weight_shifts_final)
+                    S_vals = compute_safety(df_clean, group_col, control_group, ms_selected) if ms_selected else {g: 0.0 for g in df_clean[group_col].unique()}
+                    B_vals = compute_balance_criterion(df_clean, group_col, control_group, balance_ratios, features) if (use_balance and balance_ratios) else {g: 0.0 for g in df_clean[group_col].unique()}
 
                     all_groups = list(df_clean[group_col].unique())
-                    results = pd.DataFrame(
-                        {
-                            "Группа": all_groups,
-                            "E_g (raw)": [E_vals.get(g, 0) for g in all_groups],
-                            "S_g (raw)": [S_vals.get(g, 0) for g in all_groups],
-                            "B_g (raw)": [B_vals.get(g, 0) for g in all_groups],
-                        }
-                    )
+                    results = pd.DataFrame({
+                        "Группа": all_groups,
+                        "E_g (raw)": [E_vals.get(g,0) for g in all_groups],
+                        "S_g (raw)": [S_vals.get(g,0) for g in all_groups],
+                        "B_g (raw)": [B_vals.get(g,0) for g in all_groups],
+                    })
                     E_n = normalize_dict(dict(zip(results["Группа"], results["E_g (raw)"])))
                     S_n = normalize_dict(dict(zip(results["Группа"], results["S_g (raw)"])))
                     B_n = normalize_dict(dict(zip(results["Группа"], results["B_g (raw)"])))
-
                     results["E_norm"] = [E_n[g] for g in all_groups]
                     results["S_norm"] = [S_n[g] for g in all_groups]
                     results["B_norm"] = [B_n[g] for g in all_groups]
                     st.session_state.results = results
 
-                    # Бутстрэп (по желанию)
                     if use_bootstrap:
                         with st.spinner(f"Бутстрэп {int(n_boot)} итераций..."):
+                            bstrap_kwargs = {}
+                            if has_weight and weight_shifts_final is not None:
+                                bstrap_kwargs = dict(
+                                    df_weight=st.session_state.df_weight_raw,
+                                    weight_group_col=st.session_state.wg_col,
+                                    weight_col=st.session_state.wv_col,
+                                    control_group_w=st.session_state.control_group_w,
+                                )
                             I_boot = bootstrap_indices(
-                                df_clean,
-                                group_col=group_col,
-                                control_group=control_group,
-                                me_markers=me_selected,
-                                ms_markers=ms_selected,
-                                balance_ratios=balance_ratios if (use_balance and balance_ratios) else [],
-                                features=features,
-                                w_E=w_E,
-                                w_S=w_S,
-                                w_B=w_B,
-                                n_boot=int(n_boot),
-                                random_state=42,
-                            )
+                                df_clean, group_col, control_group, me_selected, ms_selected,
+                                balance_ratios if (use_balance and balance_ratios) else [],
+                                features, w_E, w_S, w_B, int(n_boot), 42, **bstrap_kwargs)
                             st.session_state.I_boot = I_boot
                     else:
                         st.session_state.pop("I_boot", None)
 
-        # 3.7 Отображение результатов (пересчёт I_g при изменении весов — без повторного расчёта)
+        # ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ
         if "results" in st.session_state:
             results = st.session_state.results.copy()
-            results["I_g"] = (
-                w_E_n * results["E_norm"]
-                - w_S_n * results["S_norm"]
-                + w_B_n * results["B_norm"]
-            )
+            results["I_g"] = w_E_n*results["E_norm"] - w_S_n*results["S_norm"] + w_B_n*results["B_norm"]
 
             st.markdown("### 🏆 Ранжирование групп")
-            display_cols = ["Группа", "E_norm", "S_norm", "B_norm", "I_g"]
-            st.dataframe(
-                results[display_cols].round(3).sort_values("I_g", ascending=False),
-                use_container_width=True,
-            )
+            display_cols = ["Группа","E_norm","S_norm","B_norm","I_g"]
+            st.dataframe(results[display_cols].round(3).sort_values("I_g", ascending=False), use_container_width=True)
 
-            # Графики критериев
             x_labels = [str(g) for g in results["Группа"]]
             x_pos = list(range(len(x_labels)))
             n_plots = 2 + (1 if use_balance and balance_ratios else 0)
-            fig, axes = plt.subplots(1, n_plots, figsize=(6 * n_plots, 5))
-            if n_plots == 1:
-                axes = [axes]
-
+            fig, axes = plt.subplots(1, n_plots, figsize=(6*n_plots, 5))
+            if n_plots == 1: axes = [axes]
             axes[0].bar(x_pos, results["E_norm"], color="#2ecc71", alpha=0.85)
-            axes[0].set_title("E_norm — Эффективность", fontweight="bold")
-            axes[0].set_xticks(x_pos)
-            axes[0].set_xticklabels(x_labels, rotation=40, ha="right")
-
+            axes[0].set_title("E_norm — Эффективность" + (" (с массой)" if weight_shifts_final else ""), fontweight="bold")
+            axes[0].set_xticks(x_pos); axes[0].set_xticklabels(x_labels, rotation=40, ha="right")
             axes[1].bar(x_pos, results["S_norm"], color="#e74c3c", alpha=0.85)
-            axes[1].set_title("S_norm — Риск (безопасность)", fontweight="bold")
-            axes[1].set_xticks(x_pos)
-            axes[1].set_xticklabels(x_labels, rotation=40, ha="right")
-
+            axes[1].set_title("S_norm — Риск", fontweight="bold")
+            axes[1].set_xticks(x_pos); axes[1].set_xticklabels(x_labels, rotation=40, ha="right")
             if n_plots == 3:
                 axes[2].bar(x_pos, results["B_norm"], color="#3498db", alpha=0.85)
-                axes[2].set_title("B_norm — Баланс соотношений", fontweight="bold")
-                axes[2].set_xticks(x_pos)
-                axes[2].set_xticklabels(x_labels, rotation=40, ha="right")
+                axes[2].set_title("B_norm — Баланс", fontweight="bold")
+                axes[2].set_xticks(x_pos); axes[2].set_xticklabels(x_labels, rotation=40, ha="right")
+            plt.tight_layout(); st.pyplot(fig); plt.close(fig)
 
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
-
-            # Интегральный индекс
             best_val = results["I_g"].max()
-            fig2, ax2 = plt.subplots(figsize=(max(8, len(x_labels) * 1.2), 5))
-            bar_colors = ["#f1c40f" if v == best_val else "#2980b9" for v in results["I_g"]]
+            fig2, ax2 = plt.subplots(figsize=(max(8, len(x_labels)*1.2), 5))
+            bar_colors = ["#f1c40f" if v==best_val else "#2980b9" for v in results["I_g"]]
             bars = ax2.bar(x_pos, results["I_g"], color=bar_colors, alpha=0.9, edgecolor="white")
             ax2.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-            ax2.set_title(
-                "I_g — Интегральный индекс (чем выше, тем лучше)",
-                fontweight="bold", fontsize=13
-            )
-            ax2.set_xticks(x_pos)
-            ax2.set_xticklabels(x_labels, rotation=40, ha="right", fontsize=10)
+            ax2.set_title("I_g — Интегральный индекс", fontweight="bold", fontsize=13)
+            ax2.set_xticks(x_pos); ax2.set_xticklabels(x_labels, rotation=40, ha="right", fontsize=10)
             ax2.set_ylabel("I_g")
             for bar, val in zip(bars, results["I_g"]):
-                ax2.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + 0.01,
-                    f"{val:.3f}",
-                    ha="center", va="bottom", fontsize=9
-                )
-            plt.tight_layout()
-            st.pyplot(fig2)
-            plt.close(fig2)
+                ax2.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.01, f"{val:.3f}", ha="center", va="bottom", fontsize=9)
+            plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
             # Победитель
             best_idx = results["I_g"].idxmax()
             best_group = results.loc[best_idx, "Группа"]
             best_ig = results.loc[best_idx, "I_g"]
-            st.success(f"🎉 **Оптимальная группа: {best_group}** (I_g = {best_ig:.4f})")
+            st.success(f"🎉 **Оптимальная группа (все): {best_group}** (I_g = {best_ig:.4f})")
+
+            results_test = results[results["Группа"].astype(str) != str(control_group)]
+            if len(results_test) > 0:
+                best_test_idx = results_test["I_g"].idxmax()
+                best_test_group = results_test.loc[best_test_idx, "Группа"]
+                best_test_ig = results_test.loc[best_test_idx, "I_g"]
+                if str(best_group) == str(control_group):
+                    st.info(f"📌 **Лучшая среди опытных: {best_test_group}** (I_g = {best_test_ig:.4f})  — контрольная группа исключена из выбора дозы.")
 
             m_cols = st.columns(4)
-            m_cols[0].metric("Группа", str(best_group))
-            m_cols[1].metric("E (эффективность)", f"{results.loc[best_idx, 'E_norm']:.3f}")
-            m_cols[2].metric("S (риск) ↓ меньше лучше", f"{results.loc[best_idx, 'S_norm']:.3f}")
-            m_cols[3].metric("B (баланс)", f"{results.loc[best_idx, 'B_norm']:.3f}")
+            show_idx = best_test_idx if str(best_group)==str(control_group) else best_idx
+            m_cols[0].metric("Группа", str(results_test.loc[best_test_idx,"Группа"] if str(best_group)==str(control_group) else best_group))
+            m_cols[1].metric("E (эффективность)", f"{results.loc[show_idx,'E_norm']:.3f}")
+            m_cols[2].metric("S (риск) ↓", f"{results.loc[show_idx,'S_norm']:.3f}")
+            m_cols[3].metric("B (баланс)", f"{results.loc[show_idx,'B_norm']:.3f}")
 
-                       # Если есть бутстрэп — показываем его статистику
+            # Бутстрэп результаты
             if "I_boot" in st.session_state:
                 st.markdown("### 📊 Бутстрэп устойчивости I_g")
                 I_boot = st.session_state.I_boot
                 groups_bs = sorted(I_boot.keys())
                 n_boot_eff = len(next(iter(I_boot.values()))) if I_boot else 0
-
-                boot_rows = []
-                best_counts_all = {g: 0 for g in groups_bs}
-
-                if n_boot_eff > 0:
-                    I_mat = np.vstack([I_boot[g] for g in groups_bs]).T  # shape: (n_boot, n_groups)
-                    for row in I_mat:
-                        idx_best = int(np.argmax(row))
-                        g_best = groups_bs[idx_best]
-                        best_counts_all[g_best] += 1
-
-                for g in groups_bs:
-                    vals = np.array(I_boot[g])
-                    med = np.median(vals)
-                    low = np.percentile(vals, 2.5)
-                    high = np.percentile(vals, 97.5)
-                    prob_best_all = best_counts_all[g] / n_boot_eff if n_boot_eff > 0 else np.nan
-                    boot_rows.append(
-                        {
-                            "Группа": g,
-                            "I_med": med,
-                            "I_2.5%": low,
-                            "I_97.5%": high,
-                            "P(группа лучшая, с контролем)": prob_best_all,
-                        }
-                    )
-
-                boot_df = pd.DataFrame(boot_rows).sort_values(
-                    "Группа", key=lambda s: s.astype(str)
-                )
-                st.dataframe(boot_df.round(3), use_container_width=True)
-
-                # Дополнительно: лучшая опытная группа без контроля
                 control_str = str(control_group)
                 test_groups = [g for g in groups_bs if str(g) != control_str]
 
-                if n_boot_eff > 0 and test_groups:
-                    best_counts_test = {g: 0 for g in test_groups}
-
+                best_counts_all = {g: 0 for g in groups_bs}
+                best_counts_dose = {g: 0 for g in test_groups}
+                if n_boot_eff > 0:
+                    I_mat = np.vstack([I_boot[g] for g in groups_bs]).T
                     for row in I_mat:
+                        best_counts_all[groups_bs[int(np.argmax(row))]] += 1
                         vals_test = [row[groups_bs.index(g)] for g in test_groups]
-                        idx_best_t = int(np.argmax(vals_test))
-                        g_best_t = test_groups[idx_best_t]
-                        best_counts_test[g_best_t] += 1
+                        if vals_test:
+                            best_counts_dose[test_groups[int(np.argmax(vals_test))]] += 1
 
-                    test_rows = []
-                    for g in test_groups:
-                        vals = np.array(I_boot[g])
-                        test_rows.append(
-                            {
-                                "Группа": g,
-                                "I_med_без_контроля": np.median(vals),
-                                "I_2.5%_без_контроля": np.percentile(vals, 2.5),
-                                "I_97.5%_без_контроля": np.percentile(vals, 97.5),
-                                "P(лучшая среди опытных)": best_counts_test[g] / n_boot_eff,
-                            }
-                        )
+                boot_rows = []
+                for g in groups_bs:
+                    vals = np.array(I_boot[g])
+                    is_ctrl = str(g) == control_str
+                    boot_rows.append({
+                        "Группа": g,
+                        "I_med": round(np.median(vals), 3),
+                        "I_2.5%": round(np.percentile(vals, 2.5), 3),
+                        "I_97.5%": round(np.percentile(vals, 97.5), 3),
+                        "P(лучшая, все)": round(best_counts_all[g]/n_boot_eff, 3) if n_boot_eff else np.nan,
+                        "P(лучшая, опытные)": round(best_counts_dose[g]/n_boot_eff, 3) if (not is_ctrl and n_boot_eff) else "—",
+                    })
+                boot_df = pd.DataFrame(boot_rows).sort_values("Группа", key=lambda s: s.astype(str))
+                st.dataframe(boot_df, use_container_width=True)
 
-                    test_df = pd.DataFrame(test_rows).sort_values(
-                        "P(лучшая среди опытных)", ascending=False
-                    )
+                if n_boot_eff > 0 and test_groups:
+                    probs_dose = {g: best_counts_dose[g]/n_boot_eff for g in test_groups}
+                    best_dose = max(probs_dose, key=probs_dose.get)
+                    random_level = 1/len(test_groups)
+                    st.success(f"📌 **Лучшая опытная группа по бутстрэпу: {best_dose}**  (P={probs_dose[best_dose]:.2f} > случайный уровень {random_level:.2f})")
+                    if weight_shifts_final is not None:
+                        st.caption("Бутстрэп проводился с независимым ресэмплингом биохимических и весовых данных на каждой итерации.")
 
-                    st.markdown("### 📌 Лучшие опытные группы без контроля")
-                    st.dataframe(test_df.round(3), use_container_width=True)
-
-                    best_test_idx = test_df["P(лучшая среди опытных)"].idxmax()
-                    best_test_group = test_df.loc[best_test_idx, "Группа"]
-                    best_test_prob = test_df.loc[best_test_idx, "P(лучшая среди опытных)"]
-
-                    st.info(
-                        f"Лучшая опытная группа без контроля: **{best_test_group}** "
-                        f"(P = {best_test_prob:.2f})"
-                    )
-
-                fig_bs, ax_bs = plt.subplots(figsize=(max(8, len(groups_bs) * 1.2), 5))
-                data_bs = [I_boot[g] for g in groups_bs]
-                labels_bs = [str(g) for g in groups_bs]
-                ax_bs.boxplot(data_bs, labels=labels_bs, showmeans=True)
-                ax_bs.set_xlabel("Группа")
-                ax_bs.set_ylabel("I_g (бутстрэп)")
+                fig_bs, ax_bs = plt.subplots(figsize=(max(8, len(groups_bs)*1.2), 5))
+                ax_bs.boxplot([I_boot[g] for g in groups_bs], labels=[str(g) for g in groups_bs], showmeans=True)
+                ax_bs.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+                ax_bs.set_xlabel("Группа"); ax_bs.set_ylabel("I_g (бутстрэп)")
                 ax_bs.set_title("Распределение I_g по бутстрэпу")
-                plt.tight_layout()
-                st.pyplot(fig_bs)
-                plt.close(fig_bs)
+                plt.tight_layout(); st.pyplot(fig_bs); plt.close(fig_bs)
 
-            # Экспорт
-            st.download_button(
-                "⬇️ Скачать результаты CSV",
+            st.download_button("⬇️ Скачать результаты CSV",
                 data=results.round(4).sort_values("I_g", ascending=False).to_csv(index=False, sep=";"),
-                file_name="groupranker_results.csv",
-                mime="text/csv",
-            )
+                file_name="groupranker_results.csv", mime="text/csv")
 
 else:
     st.info("📁 Загрузите CSV или Excel в боковой панели для начала работы.")
-    st.markdown(
-        """
+    st.markdown("""
 ### 🚀 Быстрый старт
 
 | Шаг | Действие |
 |-----|----------|
-| 1 | Загрузите файл (CSV/Excel) — нужен столбец групп и числовые признаки |
-| 2 | Выберите **тип дизайна**: числовые дозы ИЛИ категориальные группы |
-| 3 | Укажите **контрольную группу** |
-| 4 | Запустите предобработку и анализ значимости |
-| 5 | В таблице назначьте каждому маркеру **роль**: M_E (эффективность) или M_S (риск) |
-| 6 | Настройте веса и получите **интегральный индекс I_g** |
+| 1 | Загрузите **основной файл** (биохимия, элементный анализ) |
+| 2 | Опционально загрузите **файл массы тела** (строки = особи, столбцы = группа + масса) |
+| 3 | Выберите тип дизайна, контрольную группу, признаки |
+| 4 | Последовательно пройдите шаги 1–3 анализа |
+| 5 | Назначьте роли маркерам, настройте веса, получите I_g |
 
-**Поддерживаемые дизайны:**
-- Дозо-ответные эксперименты
-- Факторные и комбинаторные
-- Любые эксперименты с группами
-"""
-    )
+**Об учёте массы тела:** файл массы может содержать данных других особей, нежели основной файл — это корректно, если обе подвыборки случайны из одной группы. KW-тест проверяет значимость; при p < α масса автоматически добавляется в критерий эффективности. При бутстрэпе оба набора данных ресэмплируются независимо.
+""")
+
+st.markdown("---")
+st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
 
 st.markdown("---")
 st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
