@@ -390,19 +390,17 @@ if weight_file is not None:
             if weight_file.name.endswith(".csv")
             else pd.read_excel(weight_file)
         )
-        st.session_state.df_weight_raw = df_wraw
 
         # ── Предпросмотр файла ──────────────────────────────────────────────
-        # Показываем первые строки прямо в боковой панели, чтобы пользователь
-        # мог визуально подтвердить, какой столбец содержит метки групп.
-        st.sidebar.success(f"✅ Доп. файл: {len(df_wraw)} строк × {len(df_wraw.columns)} столбцов")
+        st.sidebar.success(
+            f"✅ Доп. файл: {len(df_wraw)} строк × {len(df_wraw.columns)} столбцов"
+        )
         st.sidebar.caption("Первые 3 строки файла:")
         st.sidebar.dataframe(df_wraw.head(3), use_container_width=True)
 
         st.sidebar.markdown("**Выберите столбцы:**")
-        # Ключи виджетов (wg_col_sel, wv_col_sel) намеренно отличаются от
-        # ключей session_state (wg_col, wv_col) — Streamlit запрещает
-        # перезаписывать session_state[key], если key уже занят виджетом.
+        # Ключи виджетов намеренно отличаются от ключей session_state,
+        # иначе Streamlit выбрасывает исключение при явной записи.
         wg_col_name = st.sidebar.selectbox(
             "Столбец с метками групп",
             df_wraw.columns,
@@ -414,12 +412,13 @@ if weight_file is not None:
             key="wv_col_sel",
         )
 
+        # Строим вспомогательный столбец групп
+        df_wraw = df_wraw.copy()   # явная копия — не мутируем оригинал
         df_wraw["_wgroup"] = df_wraw[wg_col_name].astype(str).str.strip()
         raw_unique = df_wraw["_wgroup"].dropna().unique()
 
-        # ── Умная сортировка: числовые метки сортируются как числа ────────
+        # Умная сортировка (числовые метки → числовой порядок)
         def smart_sort_groups(vals):
-            """Числовые метки сортируем как float, текстовые — лексикографически."""
             try:
                 return sorted(vals, key=lambda x: float(x))
             except (ValueError, TypeError):
@@ -429,39 +428,51 @@ if weight_file is not None:
         n_uniq = len(unique_wgroups)
         n_rows = len(df_wraw)
 
-        # ── Валидация: слишком много групп = вероятно выбран столбец ID ───
-        if n_uniq == n_rows:
-            st.sidebar.error(
-                f"❌ Найдено {n_uniq} уникальных значений — по одному на каждую строку. "
-                f"Похоже, выбран столбец с ID животных, а не с метками групп. "
-                f"Выберите другой столбец."
-            )
-            # Не сохраняем невалидное состояние — выходим из блока
-            raise ValueError("Выбран столбец с уникальными ID вместо меток групп.")
-        elif n_uniq > 20:
-            st.sidebar.warning(
-                f"⚠️ Найдено {n_uniq} групп — это много. "
-                f"Проверьте, правильный ли столбец выбран для групп."
-            )
-        else:
-            # Всё выглядит нормально
-            preview = ", ".join(str(g) for g in unique_wgroups[:10])
-            suffix = f"... (+{n_uniq-10})" if n_uniq > 10 else ""
-            st.sidebar.markdown(f"Групп: **{n_uniq}** — {preview}{suffix}")
-
-        control_group_w = st.sidebar.selectbox(
-            "Контрольная группа (доп. файл)",
-            options=unique_wgroups,
-            key="ctrl_w_sel",
+        # Показываем диагностику выбранного столбца — всегда, не только при ошибке
+        preview_vals = ", ".join(str(g) for g in unique_wgroups[:12])
+        suffix = f" … ещё {n_uniq - 12}" if n_uniq > 12 else ""
+        st.sidebar.caption(
+            f"В столбце «{wg_col_name}»: **{n_uniq}** уникальных значений: "
+            f"{preview_vals}{suffix}"
         )
 
-        # Сохраняем под именами без суффикса _sel (нет конфликта с виджетами)
-        st.session_state["wg_col"] = "_wgroup"
-        st.session_state["wv_col"] = wv_col_name
-        st.session_state["control_group_w"] = control_group_w
+        # Предупреждение, но НЕ блокировка — пользователь видит проблему
+        # и может исправить выбор столбца без перезагрузки приложения.
+        _ext_ok = True
+        if n_uniq >= n_rows * 0.8:
+            st.sidebar.warning(
+                f"⚠️ Найдено {n_uniq} уникальных значений при {n_rows} строках. "
+                f"Возможно, выбран столбец с ID животных. "
+                f"Убедитесь, что выбран столбец с метками групп "
+                f"(например «Контроль», «I опытная» и т.д.)."
+            )
+            # Разрешаем продолжить, если пользователь подтверждает
+            _ext_ok = st.sidebar.checkbox(
+                "Продолжить с этим столбцом", value=False, key="ext_force_ok"
+            )
+        elif n_uniq > 20:
+            st.sidebar.warning(
+                f"⚠️ {n_uniq} групп — больше ожидаемого. Проверьте выбор."
+            )
 
-    except ValueError:
-        pass   # Сообщение об ошибке уже показано выше
+        if _ext_ok:
+            control_group_w = st.sidebar.selectbox(
+                "Контрольная группа (доп. файл)",
+                options=unique_wgroups,
+                key="ctrl_w_sel",
+            )
+            # Сохраняем в session_state ТОЛЬКО при корректном выборе
+            st.session_state.df_weight_raw = df_wraw
+            st.session_state["wg_col"]          = "_wgroup"
+            st.session_state["wv_col"]          = wv_col_name
+            st.session_state["control_group_w"] = control_group_w
+        else:
+            # Очищаем невалидное состояние, чтобы основной анализ
+            # не использовал некорректные данные о доп. подвыборке
+            for _k in ["df_weight_raw", "wg_col", "wv_col",
+                        "control_group_w", "weight_shifts_final"]:
+                st.session_state.pop(_k, None)
+
     except Exception as e:
         import traceback
         st.sidebar.error(f"❌ Ошибка файла: {e}")
@@ -876,6 +887,9 @@ else:
 
 **Об учёте массы тела:** файл массы может содержать данных других особей, нежели основной файл — это корректно, если обе подвыборки случайны из одной группы. KW-тест проверяет значимость; при p < α масса автоматически добавляется в критерий эффективности. При бутстрэпе оба набора данных ресэмплируются независимо.
 """)
+
+st.markdown("---")
+st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
 
 st.markdown("---")
 st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
