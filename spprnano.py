@@ -347,7 +347,13 @@ if uploaded_file is not None:
             unique_groups = sorted(df_raw["_group"].dropna().unique())
         else:
             df_raw["_group"] = df_raw[group_col_name].astype(str).str.strip()
-            unique_groups = sorted(df_raw["_group"].dropna().unique(), key=str)
+            # Умная сортировка: числовые строки сортируем как числа
+            def smart_sort_main(vals):
+                try:
+                    return sorted(vals, key=lambda x: float(x))
+                except (ValueError, TypeError):
+                    return sorted(vals, key=str)
+            unique_groups = smart_sort_main(df_raw["_group"].dropna().unique())
 
         st.sidebar.markdown(f"**Групп ({len(unique_groups)}):** " + ", ".join(str(g) for g in unique_groups))
         control_group = st.sidebar.selectbox("🎯 Контрольная группа", options=unique_groups, index=0)
@@ -379,45 +385,87 @@ if uploaded_file is not None:
 # ══════════════════════════════════════════════════════════════════════════════
 if weight_file is not None:
     try:
-        df_wraw = pd.read_csv(weight_file, sep=None, decimal=",", engine="python") if weight_file.name.endswith(".csv") else pd.read_excel(weight_file)
-        st.sidebar.success(f"✅ Масса: {len(df_wraw)} строк")
+        df_wraw = (
+            pd.read_csv(weight_file, sep=None, decimal=",", engine="python")
+            if weight_file.name.endswith(".csv")
+            else pd.read_excel(weight_file)
+        )
         st.session_state.df_weight_raw = df_wraw
 
-        st.sidebar.markdown("**Столбцы файла дополнительной подвыборки:**")
+        # ── Предпросмотр файла ──────────────────────────────────────────────
+        # Показываем первые строки прямо в боковой панели, чтобы пользователь
+        # мог визуально подтвердить, какой столбец содержит метки групп.
+        st.sidebar.success(f"✅ Доп. файл: {len(df_wraw)} строк × {len(df_wraw.columns)} столбцов")
+        st.sidebar.caption("Первые 3 строки файла:")
+        st.sidebar.dataframe(df_wraw.head(3), use_container_width=True)
+
+        st.sidebar.markdown("**Выберите столбцы:**")
         # Ключи виджетов (wg_col_sel, wv_col_sel) намеренно отличаются от
-        # ключей session_state (wg_col, wv_col), чтобы избежать конфликта:
-        # Streamlit запрещает явно менять session_state[key], если key
-        # уже используется как ключ виджета.
+        # ключей session_state (wg_col, wv_col) — Streamlit запрещает
+        # перезаписывать session_state[key], если key уже занят виджетом.
         wg_col_name = st.sidebar.selectbox(
-            "Столбец с группами",
+            "Столбец с метками групп",
             df_wraw.columns,
-            key="wg_col_sel",   # ← ключ виджета
+            key="wg_col_sel",
         )
         wv_col_name = st.sidebar.selectbox(
-            "Столбец с дополнительным признаком",
+            "Столбец с измеряемым признаком",
             [c for c in df_wraw.columns if c != wg_col_name],
-            key="wv_col_sel",   # ← ключ виджета
+            key="wv_col_sel",
         )
 
         df_wraw["_wgroup"] = df_wraw[wg_col_name].astype(str).str.strip()
-        unique_wgroups = sorted(df_wraw["_wgroup"].dropna().unique(), key=str)
-        st.sidebar.markdown(
-            f"Групп: **{len(unique_wgroups)}** — " + ", ".join(str(g) for g in unique_wgroups)
-        )
+        raw_unique = df_wraw["_wgroup"].dropna().unique()
+
+        # ── Умная сортировка: числовые метки сортируются как числа ────────
+        def smart_sort_groups(vals):
+            """Числовые метки сортируем как float, текстовые — лексикографически."""
+            try:
+                return sorted(vals, key=lambda x: float(x))
+            except (ValueError, TypeError):
+                return sorted(vals, key=str)
+
+        unique_wgroups = smart_sort_groups(raw_unique)
+        n_uniq = len(unique_wgroups)
+        n_rows = len(df_wraw)
+
+        # ── Валидация: слишком много групп = вероятно выбран столбец ID ───
+        if n_uniq == n_rows:
+            st.sidebar.error(
+                f"❌ Найдено {n_uniq} уникальных значений — по одному на каждую строку. "
+                f"Похоже, выбран столбец с ID животных, а не с метками групп. "
+                f"Выберите другой столбец."
+            )
+            # Не сохраняем невалидное состояние — выходим из блока
+            raise ValueError("Выбран столбец с уникальными ID вместо меток групп.")
+        elif n_uniq > 20:
+            st.sidebar.warning(
+                f"⚠️ Найдено {n_uniq} групп — это много. "
+                f"Проверьте, правильный ли столбец выбран для групп."
+            )
+        else:
+            # Всё выглядит нормально
+            preview = ", ".join(str(g) for g in unique_wgroups[:10])
+            suffix = f"... (+{n_uniq-10})" if n_uniq > 10 else ""
+            st.sidebar.markdown(f"Групп: **{n_uniq}** — {preview}{suffix}")
+
         control_group_w = st.sidebar.selectbox(
             "Контрольная группа (доп. файл)",
             options=unique_wgroups,
-            key="ctrl_w_sel",   # ← ключ виджета
+            key="ctrl_w_sel",
         )
 
-        # Сохраняем в session_state под ДРУГИМИ именами (без конфликта)
-        st.session_state.df_weight_raw = df_wraw
-        st.session_state["wg_col"] = "_wgroup"        # имя обработанного столбца
-        st.session_state["wv_col"] = wv_col_name      # имя столбца значений
+        # Сохраняем под именами без суффикса _sel (нет конфликта с виджетами)
+        st.session_state["wg_col"] = "_wgroup"
+        st.session_state["wv_col"] = wv_col_name
         st.session_state["control_group_w"] = control_group_w
+
+    except ValueError:
+        pass   # Сообщение об ошибке уже показано выше
     except Exception as e:
         import traceback
-        st.sidebar.error(f"❌ Ошибка файла массы: {e}"); st.sidebar.code(traceback.format_exc())
+        st.sidebar.error(f"❌ Ошибка файла: {e}")
+        st.sidebar.code(traceback.format_exc())
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ГЛАВНЫЙ АНАЛИЗ
