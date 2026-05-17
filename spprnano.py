@@ -890,6 +890,3 @@ else:
 
 st.markdown("---")
 st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
-
-st.markdown("---")
-st.markdown("*© 2026 GroupRanker Pro | Универсальная модель многокритериального ранжирования*")
