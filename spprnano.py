@@ -391,33 +391,58 @@ if weight_file is not None:
             else pd.read_excel(weight_file)
         )
 
-        # ── Предпросмотр файла ──────────────────────────────────────────────
+        # ── Предпросмотр ────────────────────────────────────────────────────
         st.sidebar.success(
             f"✅ Доп. файл: {len(df_wraw)} строк × {len(df_wraw.columns)} столбцов"
         )
-        st.sidebar.caption("Первые 3 строки файла:")
+        st.sidebar.caption("Первые 3 строки:")
         st.sidebar.dataframe(df_wraw.head(3), use_container_width=True)
 
-        st.sidebar.markdown("**Выберите столбцы:**")
-        # Ключи виджетов намеренно отличаются от ключей session_state,
-        # иначе Streamlit выбрасывает исключение при явной записи.
+        # ── Выбор столбца групп ─────────────────────────────────────────────
+        # Используем двойной механизм сохранения выбора:
+        # 1) key="wg_col_sel"  — стандартный виджетный ключ Streamlit
+        # 2) session_state["_ext_wg_choice"] — явное сохранение, которое
+        #    переживает st.rerun() во всех версиях Streamlit.
+        # index= восстанавливает выбор из явного сохранения,
+        # даже если виджетный ключ сбросился.
+        wg_options = list(df_wraw.columns)
+
+        saved_wg = st.session_state.get("_ext_wg_choice", None)
+        wg_idx = (
+            wg_options.index(saved_wg)
+            if saved_wg in wg_options
+            else 0
+        )
         wg_col_name = st.sidebar.selectbox(
             "Столбец с метками групп",
-            df_wraw.columns,
+            wg_options,
+            index=wg_idx,
             key="wg_col_sel",
+        )
+        # Явно сохраняем выбор — это надёжнее виджетного ключа
+        st.session_state["_ext_wg_choice"] = wg_col_name
+
+        # ── Выбор столбца признака ──────────────────────────────────────────
+        wv_options = [c for c in wg_options if c != wg_col_name]
+        saved_wv = st.session_state.get("_ext_wv_choice", None)
+        wv_idx = (
+            wv_options.index(saved_wv)
+            if saved_wv in wv_options
+            else 0
         )
         wv_col_name = st.sidebar.selectbox(
             "Столбец с измеряемым признаком",
-            [c for c in df_wraw.columns if c != wg_col_name],
+            wv_options,
+            index=wv_idx,
             key="wv_col_sel",
         )
+        st.session_state["_ext_wv_choice"] = wv_col_name
 
-        # Строим вспомогательный столбец групп
-        df_wraw = df_wraw.copy()   # явная копия — не мутируем оригинал
+        # ── Обработка ───────────────────────────────────────────────────────
+        df_wraw = df_wraw.copy()
         df_wraw["_wgroup"] = df_wraw[wg_col_name].astype(str).str.strip()
         raw_unique = df_wraw["_wgroup"].dropna().unique()
 
-        # Умная сортировка (числовые метки → числовой порядок)
         def smart_sort_groups(vals):
             try:
                 return sorted(vals, key=lambda x: float(x))
@@ -425,52 +450,56 @@ if weight_file is not None:
                 return sorted(vals, key=str)
 
         unique_wgroups = smart_sort_groups(raw_unique)
-        n_uniq = len(unique_wgroups)
-        n_rows = len(df_wraw)
+        n_uniq  = len(unique_wgroups)
+        n_rows  = len(df_wraw)
 
-        # Показываем диагностику выбранного столбца — всегда, не только при ошибке
-        preview_vals = ", ".join(str(g) for g in unique_wgroups[:12])
-        suffix = f" … ещё {n_uniq - 12}" if n_uniq > 12 else ""
+        # Диагностика выбранного столбца — показываем всегда
+        preview_vals = ", ".join(str(g) for g in unique_wgroups[:10])
+        suffix = f" … ещё {n_uniq - 10}" if n_uniq > 10 else ""
         st.sidebar.caption(
-            f"В столбце «{wg_col_name}»: **{n_uniq}** уникальных значений: "
+            f"Столбец «{wg_col_name}»: **{n_uniq}** уник. значений: "
             f"{preview_vals}{suffix}"
         )
 
-        # Предупреждение, но НЕ блокировка — пользователь видит проблему
-        # и может исправить выбор столбца без перезагрузки приложения.
         _ext_ok = True
         if n_uniq >= n_rows * 0.8:
             st.sidebar.warning(
-                f"⚠️ Найдено {n_uniq} уникальных значений при {n_rows} строках. "
-                f"Возможно, выбран столбец с ID животных. "
-                f"Убедитесь, что выбран столбец с метками групп "
-                f"(например «Контроль», «I опытная» и т.д.)."
+                f"⚠️ {n_uniq} уникальных значений при {n_rows} строках. "
+                f"Проверьте: выбран ли столбец с метками групп?"
             )
-            # Разрешаем продолжить, если пользователь подтверждает
             _ext_ok = st.sidebar.checkbox(
-                "Продолжить с этим столбцом", value=False, key="ext_force_ok"
+                "Продолжить с этим столбцом",
+                value=False,
+                key="ext_force_ok",
             )
         elif n_uniq > 20:
-            st.sidebar.warning(
-                f"⚠️ {n_uniq} групп — больше ожидаемого. Проверьте выбор."
-            )
+            st.sidebar.warning(f"⚠️ {n_uniq} групп — больше ожидаемого.")
 
+        # ── Контрольная группа ──────────────────────────────────────────────
         if _ext_ok:
+            saved_ctrl = st.session_state.get("_ext_ctrl_choice", None)
+            ctrl_idx = (
+                unique_wgroups.index(saved_ctrl)
+                if saved_ctrl in unique_wgroups
+                else 0
+            )
             control_group_w = st.sidebar.selectbox(
                 "Контрольная группа (доп. файл)",
                 options=unique_wgroups,
+                index=ctrl_idx,
                 key="ctrl_w_sel",
             )
-            # Сохраняем в session_state ТОЛЬКО при корректном выборе
-            st.session_state.df_weight_raw = df_wraw
+            st.session_state["_ext_ctrl_choice"] = control_group_w
+
+            # Сохраняем данные ТОЛЬКО после успешного прохождения всех проверок
+            st.session_state.df_weight_raw      = df_wraw
             st.session_state["wg_col"]          = "_wgroup"
             st.session_state["wv_col"]          = wv_col_name
             st.session_state["control_group_w"] = control_group_w
         else:
-            # Очищаем невалидное состояние, чтобы основной анализ
-            # не использовал некорректные данные о доп. подвыборке
+            # Очищаем невалидное состояние
             for _k in ["df_weight_raw", "wg_col", "wv_col",
-                        "control_group_w", "weight_shifts_final"]:
+                       "control_group_w", "weight_shifts_final"]:
                 st.session_state.pop(_k, None)
 
     except Exception as e:
