@@ -89,10 +89,23 @@ def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group")
                 pass
             if grp_vals.nunique() > 3:
                 try:
-                    d = grp_vals.astype(float)
+                    '''d = grp_vals.astype(float)
                     X = sm.add_constant(pd.DataFrame({"d": d, "d2": d**2}))
                     model = sm.OLS(x, X).fit()
-                    p_quad = model.pvalues.get("d2", 1.0)
+                    p_quad = model.pvalues.get("d2", 1.0)'''
+                    # 1. Приводим к типу float и центрируем дозы для устранения коллинеарности
+                    d = grp_vals.astype(float)
+                    d_centered = d - d.mean()
+
+                    # 2. Формируем матрицу признаков на основе центрированных доз
+                    X = pd.DataFrame({"d_lin": d_centered, "d2_quad": d_centered**2})
+                    X = sm.add_constant(X)
+
+                    # 3. Обучаем модель OLS и сразу пересчитываем стандартные ошибки по методу HC3
+                    model = sm.OLS(x, X).fit(cov_type="HC3")
+
+                    # 4. Безопасно извлекаем p-value для квадратичного члена
+                    p_quad = model.pvalues.get("d2_quad", 1.0)
                 except Exception:
                     pass
         if mode == "dose":
