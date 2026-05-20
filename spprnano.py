@@ -89,10 +89,10 @@ def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group")
                 pass
             if grp_vals.nunique() > 3:
                 try:
-                    """d = grp_vals.astype(float)
-                    X = sm.add_constant(pd.DataFrame({"d": d, "d2": d**2}))
-                    model = sm.OLS(x, X).fit()
-                    p_quad = model.pvalues.get("d2", 1.0)"""
+                    # d = grp_vals.astype(float)
+                    # X = sm.add_constant(pd.DataFrame({"d": d, "d2": d**2}))
+                    # model = sm.OLS(x, X).fit()
+                    # p_quad = model.pvalues.get("d2", 1.0)"""
                     # 1. Приводим к типу float и центрируем дозы для устранения коллинеарности
                     d = grp_vals.astype(float)
                     d_centered = d - d.mean()
