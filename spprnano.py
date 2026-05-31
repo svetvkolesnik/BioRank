@@ -601,7 +601,7 @@ if "df_processed" in st.session_state:
                     st.info(f"Удалено {len(to_drop)} маркеров (|r|>{corr_threshold}). Осталось **{len(sensitive_markers)}**.")
                     # --- НОВЫЙ БЛОК ДЛЯ ВЫВОДА ИМЕН ---
                     st.warning("Удаленные признаки:")
-                    st.write(list(to_drop)) 
+                    st.warning(f"Удаленные признаки: {', '.join(to_drop)}") 
                     # ----------------------------------
                     with st.expander("Тепловая карта корреляций"):
                         fig_corr, ax_corr = plt.subplots(figsize=(max(6, len(corr_cols)*0.6), max(5, len(corr_cols)*0.5)))
