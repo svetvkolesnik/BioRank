@@ -599,6 +599,10 @@ if "df_processed" in st.session_state:
                 sensitive_markers = [c for c in corr_cols if c not in to_drop]
                 if to_drop:
                     st.info(f"Удалено {len(to_drop)} маркеров (|r|>{corr_threshold}). Осталось **{len(sensitive_markers)}**.")
+                    # --- НОВЫЙ БЛОК ДЛЯ ВЫВОДА ИМЕН ---
+                    st.warning("Удаленные признаки:")
+                    st.write(list(to_drop)) 
+                    # ----------------------------------
                     with st.expander("Тепловая карта корреляций"):
                         fig_corr, ax_corr = plt.subplots(figsize=(max(6, len(corr_cols)*0.6), max(5, len(corr_cols)*0.5)))
                         sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="RdBu_r", center=0, ax=ax_corr, linewidths=0.5)
