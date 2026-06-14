@@ -35,22 +35,49 @@ def guess_role(col_name):
             return "M_E (эффективность)"
     return "M_E (эффективность)"
 
-def safe_numeric(col, lod=0.00005):
+def safe_numeric(col, lod=0.00005, seed=42):
+    """
+    Преобразование столбца к числовому типу с обработкой цензурированных
+    значений (<LOD). Каждое значение ниже предела обнаружения заменяется на
+    LOD * U(0.8, 1.2). Для ВОСПРОИЗВОДИМОСТИ замена детерминирована: один и
+    тот же censored-токен в одной и той же позиции даёт один и тот же результат
+    (генератор сидируется индексом строки), поэтому повторный запуск конвейера
+    не меняет состав значимых признаков M_0.
+    """
+    rng = np.random.default_rng(seed)
     s = col.astype(str).str.strip()
-    def extract_censored(val):
+    out = []
+    for val in s:
         if "<" in str(val):
-            return lod * np.random.uniform(0.8, 1.2)
-        return val
-    s = s.apply(extract_censored)
-    s = s.str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
+            out.append(lod * rng.uniform(0.8, 1.2))
+        else:
+            out.append(val)
+    s = pd.Series(out, index=col.index)
+    s = s.astype(str).str.replace(",", ".", regex=False).str.replace(" ", "", regex=False)
     return pd.to_numeric(s, errors="coerce")
 
 def winsorize_feature(series, limits=(0.05, 0.95)):
+    """Винсоризация по общему распределению признака (все группы вместе)."""
     data = series.dropna()
     if len(data) > 5:
         lower, upper = data.quantile(limits)
         return series.clip(lower=lower, upper=upper)
     return series
+
+def winsorize_feature_by_group(series, groups, limits=(0.05, 0.95)):
+    """
+    Винсоризация ВНУТРИ каждой группы отдельно. Предпочтительна при сильном
+    групповом эффекте: ограничивает только внутригрупповые выбросы и не
+    «срезает» межгрупповой сигнал (например, реально высокие значения в
+    группе максимальной дозы). При n_k <= 5 группа не винсоризуется.
+    """
+    out = series.copy()
+    for g, idx in series.groupby(groups).groups.items():
+        sub = series.loc[idx].dropna()
+        if len(sub) > 5:
+            lower, upper = sub.quantile(limits)
+            out.loc[idx] = series.loc[idx].clip(lower=lower, upper=upper)
+    return out
 
 def visualize_outliers(df, features):
     st.subheader("🔍 Анализ выбросов")
@@ -69,7 +96,16 @@ def visualize_outliers(df, features):
                     st.pyplot(fig)
                     plt.close(fig)
 
-def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group"):
+def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group", fdr=False):
+    """
+    Отбор информативных признаков.
+    fdr=True — к p-значениям критерия Краскела–Уоллиса по всем признакам
+    применяется поправка Бенджамини–Хохберга (контроль FDR на уровне alpha).
+    Скорректированные p используются в правиле значимости вместо сырых p(KW).
+    Поправка применяется только к KW-ветви; критерии Спирмена и квадратичной
+    регрессии в дозовом режиме сохраняют сырые пороги, так как образуют
+    отдельные семейства гипотез с иной интерпретацией.
+    """
     results = []
     for feature in features:
         x = df[feature].dropna()
@@ -89,11 +125,8 @@ def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group")
                 pass
             if grp_vals.nunique() > 3:
                 try:
-                    # d = grp_vals.astype(float)
-                    # X = sm.add_constant(pd.DataFrame({"d": d, "d2": d**2}))
-                    # model = sm.OLS(x, X).fit()
-                    # p_quad = model.pvalues.get("d2", 1.0)"""
-                    # 1. Приводим к типу float и центрируем дозы для устранения коллинеарности
+                    # 1. Приводим к типу float и центрируем дозы для устранения
+                    #    коллинеарности линейного и квадратичного членов
                     d = grp_vals.astype(float)
                     d_centered = d - d.mean()
 
@@ -101,26 +134,60 @@ def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group")
                     X = pd.DataFrame({"d_lin": d_centered, "d2_quad": d_centered**2})
                     X = sm.add_constant(X)
 
-                    # 3. Обучаем модель OLS и сразу пересчитываем стандартные ошибки по методу HC3
+                    # 3. Обучаем модель OLS с робастными ошибками HC3
                     model = sm.OLS(x, X).fit(cov_type="HC3")
 
                     # 4. Безопасно извлекаем p-value для квадратичного члена
                     p_quad = model.pvalues.get("d2_quad", 1.0)
                 except Exception:
                     pass
-        if mode == "dose":
-            is_sensitive = (p_kw < alpha) or (not np.isnan(p_spear) and p_spear < alpha and abs(rho) > 0.5) or (not np.isnan(p_quad) and p_quad < alpha)
-        else:
-            is_sensitive = p_kw < alpha
         results.append({
             "Маркер": feature,
-            "p (KW)": round(p_kw, 4),
-            "ρ Спирмен": round(rho, 3) if not np.isnan(rho) else "—",
-            "p (Spear)": round(p_spear, 4) if not np.isnan(p_spear) else "—",
-            "p (квадр.)": round(p_quad, 4) if not np.isnan(p_quad) else "—",
-            "Значимый": is_sensitive,
+            "p (KW)": p_kw,
+            "ρ Спирмен": rho,
+            "p (Spear)": p_spear,
+            "p (квадр.)": p_quad,
         })
-    return pd.DataFrame(results)
+
+    res_df = pd.DataFrame(results)
+    if res_df.empty:
+        return res_df
+
+    # ── Поправка на множественность (опционально) ───────────────────────────
+    if fdr:
+        from statsmodels.stats.multitest import multipletests
+        pk = res_df["p (KW)"].fillna(1.0).values
+        _, p_kw_adj, _, _ = multipletests(pk, alpha=alpha, method="fdr_bh")
+        res_df["p (KW, FDR)"] = p_kw_adj
+        p_kw_eff = p_kw_adj
+    else:
+        p_kw_eff = res_df["p (KW)"].fillna(1.0).values
+
+    # ── Правило значимости ──────────────────────────────────────────────────
+    sig = []
+    for i, row in res_df.reset_index(drop=True).iterrows():
+        pk = p_kw_eff[i]
+        rho_i, ps_i, pq_i = row["ρ Спирмен"], row["p (Spear)"], row["p (квадр.)"]
+        if mode == "dose":
+            is_sensitive = (
+                (pk < alpha)
+                or (not pd.isna(ps_i) and ps_i < alpha and abs(rho_i) > 0.5)
+                or (not pd.isna(pq_i) and pq_i < alpha)
+            )
+        else:
+            is_sensitive = pk < alpha
+        sig.append(bool(is_sensitive))
+    res_df["Значимый"] = sig
+
+    # ── Форматирование для отображения ──────────────────────────────────────
+    disp = res_df.copy()
+    disp["p (KW)"] = disp["p (KW)"].round(4)
+    if fdr:
+        disp["p (KW, FDR)"] = disp["p (KW, FDR)"].round(4)
+    disp["ρ Спирмен"] = disp["ρ Спирмен"].apply(lambda v: round(v, 3) if not pd.isna(v) else "—")
+    disp["p (Spear)"] = disp["p (Spear)"].apply(lambda v: round(v, 4) if not pd.isna(v) else "—")
+    disp["p (квадр.)"] = disp["p (квадр.)"].apply(lambda v: round(v, 4) if not pd.isna(v) else "—")
+    return disp
 
 # ── МАССА ТЕЛА ──────────────────────────────────────────────────────────────
 def compute_weight_kw_and_shifts(df_weight, weight_group_col, weight_col, control_group, alpha=0.05):
@@ -213,8 +280,31 @@ def compute_safety(df, group_col, control_group, ms_markers):
     return S_vals
 
 def compute_balance_criterion(df, group_col, control_group, balance_ratios, features):
+    """
+    Критерий гомеостатического баланса.
+    Сопоставление «элемент → столбец» строгое: имя столбца должно начинаться
+    с базового имени элемента, за которым следует разделитель (_/конец строки)
+    либо суффикс органа. Это исключает ложные срабатывания подстроки
+    (например, элемент 'B' внутри 'Pb' или 'ALB'). Числитель и знаменатель
+    сопоставляются по одному и тому же органу (суффиксу).
+    """
     B_vals = {}
     eps = 1e-8
+
+    def match_element(elem, loc_suffix):
+        """Столбцы, чьё базовое имя == elem и орган == loc_suffix."""
+        out = []
+        e = elem.lower()
+        for c in features:
+            cl = c.lower()
+            # базовое имя = часть до первого '_'
+            base = cl.split("_", 1)[0]
+            suf_match = re.search(r"(_[a-zа-я]+)$", cl)
+            suf = suf_match.group(1) if suf_match else ""
+            if base == e and (loc_suffix == "" or suf == loc_suffix):
+                out.append(c)
+        return out
+
     for group in df[group_col].unique():
         deviations = []
         for ratio_str in balance_ratios:
@@ -222,11 +312,12 @@ def compute_balance_criterion(df, group_col, control_group, balance_ratios, feat
             if "/" not in ratio_str:
                 continue
             num_base, den_base = [x.strip() for x in ratio_str.split("/", 1)]
-            num_cols = [c for c in features if num_base.lower() in c.lower()]
+            # все органы, в которых присутствует числитель
+            num_cols = match_element(num_base, "")
             for nc in num_cols:
-                loc_match = re.search(r"(_[a-z]+)$", nc.lower())
+                loc_match = re.search(r"(_[a-zа-я]+)$", nc.lower())
                 loc_suffix = loc_match.group(1) if loc_match else ""
-                dc_candidates = [c for c in features if den_base.lower() in c.lower() and c.lower().endswith(loc_suffix)]
+                dc_candidates = match_element(den_base, loc_suffix)
                 if not dc_candidates:
                     continue
                 dc = dc_candidates[0]
@@ -242,14 +333,28 @@ def compute_balance_criterion(df, group_col, control_group, balance_ratios, feat
         B_vals[group] = -np.nanmedian(deviations) if deviations else 0.0
     return B_vals
 
-def normalize_dict(d):
-    vals = [v for v in d.values() if not pd.isna(v)]
-    if not vals:
+def normalize_dict(d, exclude=None):
+    """
+    min-max нормализация значений критерия по группам.
+
+    exclude: ключ контрольной группы (или None). Если задан, контрольная
+    группа ИСКЛЮЧАЕТСЯ из вычисления min/max — шкала строится только по
+    опытным группам. Это устраняет зависимость нормировки опытных групп от
+    положения контроля (контроль по построению занимает крайнее положение в
+    пространстве баланса B_0=0 и сдвигов E_0=S_0=0). Контрольной группе при
+    этом присваивается значение по той же шкале; оно может выходить за [0,1],
+    что корректно, поскольку выбор оптимума ведётся только среди опытных.
+    """
+    if exclude is not None:
+        scale_vals = [v for k, v in d.items() if k != exclude and not pd.isna(v)]
+    else:
+        scale_vals = [v for v in d.values() if not pd.isna(v)]
+    if not scale_vals:
         return {k: 0.5 for k in d}
-    vmin, vmax = min(vals), max(vals)
+    vmin, vmax = min(scale_vals), max(scale_vals)
     if vmax == vmin:
         return {k: 0.5 for k in d}
-    return {k: (v - vmin) / (vmax - vmin) for k, v in d.items()}
+    return {k: (v - vmin) / (vmax - vmin) if not pd.isna(v) else 0.5 for k, v in d.items()}
 
 def safe_rerun():
     try:
@@ -306,9 +411,9 @@ def bootstrap_indices(df, group_col, control_group, me_markers, ms_markers,
                         g_w_med = np.median(g_w[rng.integers(0, len(g_w), size=len(g_w))])
                         weight_shifts_b[g] = (g_w_med - ctrl_w_med) / iqr_weight_global
 
-        E_n_b = normalize_dict(compute_efficiency(df_b, group_col, control_group, me_markers, weight_shifts_b))
-        S_n_b = normalize_dict(compute_safety(df_b, group_col, control_group, ms_markers) if ms_markers else {g: 0.0 for g in groups})
-        B_n_b = normalize_dict(compute_balance_criterion(df_b, group_col, control_group, balance_ratios, features) if balance_ratios else {g: 0.0 for g in groups})
+        E_n_b = normalize_dict(compute_efficiency(df_b, group_col, control_group, me_markers, weight_shifts_b), exclude=control_group)
+        S_n_b = normalize_dict(compute_safety(df_b, group_col, control_group, ms_markers) if ms_markers else {g: 0.0 for g in groups}, exclude=control_group)
+        B_n_b = normalize_dict(compute_balance_criterion(df_b, group_col, control_group, balance_ratios, features) if balance_ratios else {g: 0.0 for g in groups}, exclude=control_group)
 
         for g in groups:
             I_boot[g].append(w_E_n * E_n_b.get(g, 0.5) - w_S_n * S_n_b.get(g, 0.5) + w_B_n * B_n_b.get(g, 0.5))
@@ -540,10 +645,17 @@ if "df_processed" in st.session_state:
         if st.button("📈 Показать боксплоты"):
             visualize_outliers(df, features)
     with col_b:
-        outlier_method = st.radio("Метод", ["none (не трогать)", "winsorize (5%–95%)"])
+        outlier_method = st.radio("Метод", [
+            "none (не трогать)",
+            "winsorize по всей выборке (5%–95%)",
+            "winsorize внутри групп (5%–95%)",
+        ])
     if st.button("⚙️ Применить и перейти к анализу"):
         df_clean = df.copy()
-        if "winsorize" in outlier_method:
+        if "внутри групп" in outlier_method:
+            for feat in features:
+                df_clean[feat] = winsorize_feature_by_group(df_clean[feat], df_clean[group_col])
+        elif "по всей выборке" in outlier_method:
             for feat in features:
                 df_clean[feat] = winsorize_feature(df_clean[feat])
         st.session_state.df_clean = df_clean
@@ -559,9 +671,19 @@ if "df_processed" in st.session_state:
         else:
             st.caption("Критерий Краскела–Уоллиса для каждого маркера.")
         alpha_val = st.slider("Уровень значимости α", 0.01, 0.20, 0.05, 0.01)
+        use_fdr = st.checkbox(
+            "Поправка на множественность сравнений (FDR, Бенджамини–Хохберг)",
+            value=False,
+            help="Контролирует долю ложных открытий при одновременной проверке "
+                 "большого числа признаков. Применяется к p-значениям критерия "
+                 "Краскела–Уоллиса. По умолчанию выключена: первичный отбор носит "
+                 "характер скрининга, защита от переобучения возлагается на "
+                 "редукцию мультиколлинеарности, бутстрэп и анализ устойчивости.",
+        )
         if st.button("📊 Рассчитать значимость", key="sens_btn"):
             with st.spinner("Анализ..."):
-                st.session_state.group_stats = compute_group_sensitivity(df_clean, group_col, features, alpha=alpha_val, mode=mode_str)
+                st.session_state.group_stats = compute_group_sensitivity(
+                    df_clean, group_col, features, alpha=alpha_val, mode=mode_str, fdr=use_fdr)
         if "group_stats" in st.session_state:
             gs = st.session_state.group_stats
             sensitive = gs[gs["Значимый"]]
@@ -773,9 +895,9 @@ if "df_processed" in st.session_state:
                         "S_g (raw)": [S_vals.get(g,0) for g in all_groups],
                         "B_g (raw)": [B_vals.get(g,0) for g in all_groups],
                     })
-                    E_n = normalize_dict(dict(zip(results["Группа"], results["E_g (raw)"])))
-                    S_n = normalize_dict(dict(zip(results["Группа"], results["S_g (raw)"])))
-                    B_n = normalize_dict(dict(zip(results["Группа"], results["B_g (raw)"])))
+                    E_n = normalize_dict(dict(zip(results["Группа"], results["E_g (raw)"])), exclude=control_group)
+                    S_n = normalize_dict(dict(zip(results["Группа"], results["S_g (raw)"])), exclude=control_group)
+                    B_n = normalize_dict(dict(zip(results["Группа"], results["B_g (raw)"])), exclude=control_group)
                     results["E_norm"] = [E_n[g] for g in all_groups]
                     results["S_norm"] = [S_n[g] for g in all_groups]
                     results["B_norm"] = [B_n[g] for g in all_groups]
@@ -867,6 +989,15 @@ if "df_processed" in st.session_state:
                 st.markdown("### 📊 Бутстрэп устойчивости I_g")
                 I_boot = st.session_state.I_boot
                 groups_bs = sorted(I_boot.keys())
+                _min_nk = df_clean.groupby(group_col).size().min()
+                if _min_nk <= 3:
+                    st.warning(
+                        f"⚠️ Минимальный размер группы n_k = {int(_min_nk)}. При n_k ≤ 3 "
+                        f"непараметрический бутстрэп по объектам опирается на крайне малое "
+                        f"число различимых ресэмплов: распределение I_g дискретно, а оценки "
+                        f"P(лучшая) имеют грубую гранулярность. Результаты бутстрэпа для таких "
+                        f"групп следует интерпретировать качественно, а не как точные вероятности."
+                    )
                 n_boot_eff = len(next(iter(I_boot.values()))) if I_boot else 0
                 control_str = str(control_group)
                 test_groups = [g for g in groups_bs if str(g) != control_str]
