@@ -127,20 +127,45 @@ def compute_group_sensitivity(df, group_col, features, alpha=0.05, mode="group",
                 try:
                     # 1. Приводим к типу float и центрируем дозы для устранения
                     #    коллинеарности линейного и квадратичного членов
-                    d = grp_vals.astype(float)
-                    d_centered = d - d.mean()
+                    #d = grp_vals.astype(float)
+                    #d_centered = d - d.mean()
 
                     # 2. Формируем матрицу признаков на основе центрированных доз
-                    X = pd.DataFrame({"d_lin": d_centered, "d2_quad": d_centered**2})
-                    X = sm.add_constant(X)
+                    #X = pd.DataFrame({"d_lin": d_centered, "d2_quad": d_centered**2})
+                    #X = sm.add_constant(X)
 
                     # 3. Обучаем модель OLS с робастными ошибками HC3
-                    model = sm.OLS(x, X).fit(cov_type="HC3")
+                    #model = sm.OLS(x, X).fit(cov_type="HC3")
 
                     # 4. Безопасно извлекаем p-value для квадратичного члена
-                    p_quad = model.pvalues.get("d2_quad", 1.0)
-                except Exception:
-                    pass
+                    #p_quad = model.pvalues.get("d2_quad", 1.0)
+                #except Exception:
+                    #pass
+                    d = grp_vals.astype(float).values
+                    dc = d - d.mean()
+                    X_np = np.column_stack([np.ones(len(dc)), dc, dc**2])
+                    y_np = x.values.astype(float)
+        
+                    # OLS
+                    beta = np.linalg.lstsq(X_np, y_np, rcond=None)[0]
+                    resid = y_np - X_np @ beta
+        
+                    # HC3 робастные стандартные ошибки
+                    XtXinv = np.linalg.pinv(X_np.T @ X_np)
+                    h = np.clip(np.diag(X_np @ XtXinv @ X_np.T), 0, 0.9999)
+                    e_hc3 = resid / (1 - h)
+                    meat = (X_np * e_hc3[:, None]).T @ (X_np * e_hc3[:, None])
+                    vcov = XtXinv @ meat @ XtXinv
+        
+                    se_quad = np.sqrt(max(vcov[2, 2], 0))
+                    if se_quad > 0:
+                        t_stat = beta[2] / se_quad
+                        p_quad = float(2 * stats.t.sf(abs(t_stat), df=len(y_np) - 3))
+                    # если se_quad == 0, p_quad остаётся np.nan
+        
+                except Exception as e:
+                    # Теперь хотя бы логируем что пошло не так
+                    print(f"[quad warning] {feature}: {e}")
         results.append({
             "Маркер": feature,
             "p (KW)": p_kw,
